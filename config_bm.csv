@@ -1,0 +1,50 @@
+# type (r;w;u;1-9),class,name,comment,QQ,ZZ,PBSB,ID,field1,part (m;s),type / templates,divider / values,unit,comment,field2,part (m;s),type / templates,divider / values,unit,comment
+#
+# Wolf BM (the older control module - NOT the BM-2, see config_bm2.csv).
+# Verified on a Wolf COB-15 oil condensing boiler, 2026-09-19 / 2026-09-20.
+#
+# ADDRESSES ARE INSTALLATION SPECIFIC. On this system the BM sits at
+# master f1 / slave f6. Check `ebusctl info` for your own bus and adjust
+# the ZZ column. The module identifies itself as "MF=Kromschroeder;SW=0204".
+#
+# NOTE ON THE ID COLUMN: the leading byte of a 5022/5023 ID is a CRC8 over
+# the following data bytes (see README, "The first ID byte is a CRC8").
+# For WRITE messages that CRC would have to cover the value as well, which
+# a static CSV cannot express. The short form without the CRC byte is used
+# instead - it is accepted by the BM and is what the telegrams below rely on.
+#
+# --- Operating mode, read -------------------------------------------------
+# TelegramNr 274 (0x0112). Short form, NN=02, no CRC byte: f6 5022 02 1201
+# Values match the Wolf SmartSet parameter.xml, DeviceTemplate DTID=30000 "BM".
+# "Abgastest" (0) is a service function that drives the burner to full load -
+# do not write it.
+r,bm,betriebsart,Betriebsart,,f6,5022,1201,betriebsart,,UIN,0=Abgastest;1=Standby;2=Zeitschaltuhr;3=Heizbetrieb;4=Absenkbetrieb;5=nur Warmwasser;14=Handbetrieb,,Betriebsart
+#
+# --- Operating mode, write ------------------------------------------------
+# Target is the MASTER address f1, NOT the slave f6. Writing to f6 is
+# acknowledged and then silently discarded.
+# Resulting telegram: f1 5023 08 1201 <value LE16> 5d010000
+# The 4 byte suffix is mandatory here; without it the BM acks and discards.
+# Verified in both directions via four independent channels: TelegramNr 274,
+# TelegramNr 90, broadcast bit 6 and a real setpoint jump 5.0 -> 36.8 degC.
+w,bm,betriebsart,Betriebsart setzen,,f1,5023,1201,betriebsart,,UIN,0=Abgastest;1=Standby;2=Zeitschaltuhr;3=Heizbetrieb;4=Absenkbetrieb;5=nur Warmwasser,,Betriebsart,suffix,,HEX:4,=5d010000,,
+#
+# --- Operating mode, read-only mirror -------------------------------------
+# TelegramNr 90 (0x005A), CRC8(5A 00) = 0x28. Always tracks TelegramNr 274
+# but is NOT writable - write attempts are acked and discarded. Kept here
+# because it is a useful cross-check. Exists on the BM only; the boiler at
+# 08 does not know it.
+r,bm,betriebsart_spiegel,Betriebsart (Spiegel),,f6,5022,285A00,betriebsart_spiegel,,UIN,0=Abgastest;1=Standby;2=Zeitschaltuhr;3=Heizbetrieb;4=Absenkbetrieb;5=nur Warmwasser,,Betriebsart Spiegel
+#
+# --- Summer/winter flag from the RcTarget broadcast -----------------------
+# Broadcast f1 fe 0800, data byte 5, bit 6. The stock kromschroeder config
+# decodes only bit 0 (hwc) and bit 1 (hc) of that byte, so bit 6 stays
+# invisible there. Passive - updates itself, no polling and no bus load.
+# Found by diffing two hours of bus capture: the bit flipped exactly once,
+# at the moment the mode was changed on the BM.
+u,bm,rcmode,Betriebsart (Broadcast),f1,fe,0800,,ign,,IGN:5,,,,mode,,BI6:1,0=Zeitschaltuhr;1=nur Warmwasser,,Betriebsart
+#
+# --- Time program selection (untested) ------------------------------------
+# TelegramNr 276 (0x0114), same structure as 274. Not verified - uncomment
+# at your own risk.
+#w,bm,zeitprogramm,Zeitprogramm,,f1,5023,1401,zeitprogramm,,UIN,,,Zeitprogramm,suffix,,HEX:4,=5d010000,,
