@@ -46,5 +46,75 @@ u,bm,rcmode,Betriebsart (Broadcast),f1,fe,0800,,ign,,IGN:5,,,,mode,,BI6:1,0=Zeit
 #
 # --- Time program selection (untested) ------------------------------------
 # TelegramNr 276 (0x0114), same structure as 274. Not verified - uncomment
-# at your own risk.
+# at your own risk. Reads 0 here, which is "program 1" (KeyValueList 0;1;1;2;2;3).
 #w,bm,zeitprogramm,Zeitprogramm,,f1,5023,1401,zeitprogramm,,UIN,,,Zeitprogramm,suffix,,HEX:4,=5d010000,,
+#
+# --- Automatic summer/winter switchover temperature -----------------------
+# TelegramNr 278 (0x0116), SS10 in the vendor database -> SIN with divider 10.
+# Above this damped outside temperature the BM stops heating on its own while
+# in "Zeitschaltuhr"; the flow setpoint drops to the 5.0 degC frost value.
+# Range 0-40 degC, step 0.5, factory default 20.0. Verified read and write
+# (17.5 -> 17.0 -> 17.5), the operating mode is not affected by the write.
+# Related: TelegramNr 279 (0x0117) = ECO/ABS threshold, reads 10.0 here.
+r,bm,wiso_temp,Wi/So Umschaltung,,f6,5022,1601,temp,,SIN,10,°C,Wi/So Umschaltung
+w,bm,wiso_temp,Wi/So Umschaltung setzen,,f1,5023,1601,temp,,SIN,10,°C,Wi/So Umschaltung,suffix,,HEX:4,=5d010000,,
+#
+# --- Domestic hot water setpoint ------------------------------------------
+# TelegramNr 19 (0x0013), vendor DTID 30000 PTID 30066 "Eingestellte
+# Warmwassersolltemperatur", range 15-80 degC. Verified read and write
+# (55.0 -> 62.0 -> 55.0). All four Kromschroeder modules on this bus return
+# the same value, so it is a system wide setting, not a per-module one.
+#
+# The practical upper limit is the boiler's DHW maximum (TelegramNr 385,
+# 65.0 degC here). Note that raising this value does NOT start a charge while
+# the DHW time program is blocking - the controller then keeps commanding
+# 10.0 degC to the boiler regardless. See README, "1x DHW".
+r,bm,warmwasser_soll,Warmwasser Solltemperatur,,f6,5022,1300,temp,,UIN,10,°C,WW Soll
+w,bm,warmwasser_soll,Warmwasser Solltemperatur setzen,,f1,5023,1300,temp,,UIN,10,°C,WW Soll,suffix,,HEX:4,=5d010000,,
+#
+# --- Domestic hot water minimum temperature (parameter A13) ---------------
+# TelegramNr 408 (0x0198), vendor PTID 30033, range 15-65 degC. Reads 45.0
+# here. Writable, but like the setpoint above it has no effect while the DHW
+# time program is blocking.
+r,bm,warmwasser_min,Warmwasserminimaltemperatur,,f6,5022,9801,temp,,UIN,10,°C,WW Minimum
+w,bm,warmwasser_min,Warmwasserminimaltemperatur setzen,,f1,5023,9801,temp,,UIN,10,°C,WW Minimum,suffix,,HEX:4,=5d010000,,
+#
+# --- Real time clock ------------------------------------------------------
+# TelegramNr 289-295 (0x0121-0x0127), one 16 bit UIN register each:
+# weekday, day, month, year (two digit), hour, minute, second.
+# Readable and writable with the same short form as everything else above.
+# Useful as a self test of the read path - the values are trivially checkable.
+#
+# The BM has no radio clock and drifts; it was 71 s slow when this was first
+# measured. A wrong clock shifts every heating and DHW time program, so it is
+# worth resynchronising it now and then. When writing, set the seconds LAST
+# and allow for the bus round trip of the preceding writes.
+r,bm,uhr_wochentag,BM Wochentag,,f6,5022,2101,value,,UIN,1=Montag;2=Dienstag;3=Mittwoch;4=Donnerstag;5=Freitag;6=Samstag;7=Sonntag,,Wochentag
+w,bm,uhr_wochentag,BM Wochentag setzen,,f1,5023,2101,value,,UIN,1=Montag;2=Dienstag;3=Mittwoch;4=Donnerstag;5=Freitag;6=Samstag;7=Sonntag,,Wochentag,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_tag,BM Tag,,f6,5022,2201,value,,UIN,,,Tag
+w,bm,uhr_tag,BM Tag setzen,,f1,5023,2201,value,,UIN,,,Tag,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_monat,BM Monat,,f6,5022,2301,value,,UIN,,,Monat
+w,bm,uhr_monat,BM Monat setzen,,f1,5023,2301,value,,UIN,,,Monat,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_jahr,BM Jahr,,f6,5022,2401,value,,UIN,,,Jahr
+w,bm,uhr_jahr,BM Jahr setzen,,f1,5023,2401,value,,UIN,,,Jahr,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_stunde,BM Stunde,,f6,5022,2501,value,,UIN,,,Stunde
+w,bm,uhr_stunde,BM Stunde setzen,,f1,5023,2501,value,,UIN,,,Stunde,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_minute,BM Minute,,f6,5022,2601,value,,UIN,,,Minute
+w,bm,uhr_minute,BM Minute setzen,,f1,5023,2601,value,,UIN,,,Minute,suffix,,HEX:4,=5d010000,,
+r,bm,uhr_sekunde,BM Sekunde,,f6,5022,2701,value,,UIN,,,Sekunde
+w,bm,uhr_sekunde,BM Sekunde setzen,,f1,5023,2701,value,,UIN,,,Sekunde,suffix,,HEX:4,=5d010000,,
+#
+# --- "1x Warmwasser" / 1x DHW - NOT available on this BM -------------------
+# TelegramNr 708 (0x02C4), vendor DTID 30000 PTID 30073-30081, minutes 0-60.
+# It is in the vendor database, but this module does not implement it: every
+# bus participant (08, 15, 35, 75, f6) answers 0x8000 = unknown register, and
+# it still does so WHILE a charge started from the BM keypad is running.
+# Seven write variants were acked and had no effect. A bus capture of a real
+# keypress contains no matching parameter telegram at all - the BM is a master
+# itself and handles the function internally.
+# Same result for TelegramNr 10117 (the BM-2 register, see config_bm2.csv) and
+# for TelegramNr 362 "Warmwasserschnellstart" on the boiler.
+# Left here commented out so nobody spends another afternoon on it.
+# See README, "1x DHW", for a workaround that does work.
+#r,bm,warmwasser_1x,1x Warmwasser,,f6,5022,C402,minutes,,SIN,,min,1x Warmwasser
+#w,bm,warmwasser_1x,1x Warmwasser bereiten,,f1,5023,C402,minutes,,SIN,,min,1x Warmwasser,suffix,,HEX:4,=5d010000,,

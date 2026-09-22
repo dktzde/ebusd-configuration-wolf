@@ -5,7 +5,9 @@ ebusd configuration files for some Wolf devices.
 - **CHA 07/10** and **COB-15** (Field "CHA Status" is still work in progress, since I have some difficulty with decoding this bitmask in ebusd. Might have to do some post-processing here in Node-RED)
 - **MM-2** (Most messages have to be requested by polling and have to be chosen according to the configuration of the MM-2)
 - **BM-2** at the moment only contain a few select parameters which control a directly connected heating circuit.
-- **BM** (the older module, `config_bm.csv`) – operating mode readable *and writable*, verified on a COB-15.
+- **BM** (the older module, `config_bm.csv`) – operating mode, summer/winter
+  switchover temperature, DHW setpoint, DHW minimum and the real time clock,
+  all readable *and writable*, verified on a COB-15.
 
 Note: MM-2 configuration file includes only status fields. Configuration parameters are not included.
 
@@ -187,12 +189,98 @@ A Wolf ISM7 gateway is **not** required for any of this.
 
 ---
 
+## Looking up TelegramNr instead of scanning for it
+
+Wolf parameter numbers do not have to be brute-forced. The ISM7 parameter
+database is public in [`zivillian/ism7mqtt`](https://github.com/zivillian/ism7mqtt),
+`src/ism7mqtt/Resources/`:
+
+| File | Content |
+| --- | --- |
+| `parameter.xml` | PTID → name, min/max, step size, decimals |
+| `converter.xml` | CTID → **TelegramNr** and type (`SS10` = signed 16 bit, divisor 10) |
+| `device.xml` | device templates (`DTID`) with their `ParameterReference` lists |
+
+For the BM families PTID = CTID, so `device.xml` → `DTID` → the referenced
+PTIDs is enough to get a complete register list.
+
+Two caveats, both learned the hard way:
+
+- **A TelegramNr is only unique within a device template.** TelegramNr 385 is
+  "DHW maximum temperature" in the boiler templates and does not exist at all
+  in `DTID 30000 "BM"`. Always pick the matching `DTID` first.
+- **The database describes the product family, not your installation.** A hit
+  there is a hypothesis, not a proof – verify it on your own bus
+  (`hex f6502202 <TelegramNr LE16>`) before relying on it. See the next
+  section for a register that is neatly documented and simply not implemented.
+
+---
+
+## 1x DHW
+
+"1x Warmwasser bereiten" – the one-shot DHW charge button on the control
+module. **On a BM this is not triggerable over the bus.** Verified 2026-09-22
+on a COB-15 with a BM at master `f1` / slave `f6`:
+
+| TelegramNr | Source | Result |
+| --- | --- | --- |
+| 708 (`0x02C4`) | vendor template `DTID 30000 "BM"`, PTID 30073–30081 | `020080` at every bus participant (`08`, `15`, `35`, `75`, `f6`) |
+| 10117 (`0x2785`) | BM-2 register, see `config_bm2.csv` | same |
+| 362 (`0x016A`) | boiler "Warmwasserschnellstart" | same |
+
+`0x8000` means "register unknown / not available". A countdown register that
+existed would read `0` when idle, not `0x8000` – and it still answered
+`0x8000` **while a charge started from the BM keypad was running**. Seven
+write variants (both ID forms, both addresses, minutes and flag values) were
+acknowledged and had no effect. A `grab` of the real keypress contains no
+matching parameter telegram at all: the BM is a master itself and handles the
+function internally, exactly like the manual operating-mode change described
+above.
+
+The commented-out `warmwasser_1x` rows in `config_bm.csv` are kept as a
+record of that, not as something to uncomment and expect to work.
+
+### What does work
+
+Operating mode **3 "Heizbetrieb"** releases the DHW charge immediately and for
+as long as it is set, regardless of the DHW time programme:
+
+```
+write -c bm betriebsart Heizbetrieb    # start
+write -c bm betriebsart nur_Warmwasser # back to where you were
+```
+
+In the `hc RcTarget` broadcast the `hwc` bit goes to 1 and the DHW setpoint
+commanded to the boiler jumps from the 10.0 °C blocking value to the real
+setpoint. That `hwc` bit is the only reliable indicator of a running charge,
+including charges started at the module itself.
+
+Side effect: in winter this also heats the rooms while it is set. In summer
+the automatic summer/winter switchover suppresses that. Restore the previous
+mode when the tank is full.
+
+### What does not work, although it looks like it should
+
+| Attempt | Why it fails |
+| --- | --- |
+| Raising the DHW setpoint (TelegramNr 19) | while the time programme blocks, the controller keeps commanding 10.0 °C to the boiler no matter what the setpoint says |
+| Raising the DHW minimum A13 (TelegramNr 408) | same |
+
+Both registers are cleanly writable, they just have no effect in that state.
+
+One more caveat when driving a charge from outside: the boiler only starts
+once the tank has dropped below the setpoint by the **DHW hysteresis**
+(TelegramNr 320 at the boiler, 5.0 K here). Within that band nothing happens
+and the mode change only looks broken.
+
+---
+
 ## Files
 
 | File | Content |
 | --- | --- |
 | `config_cha.csv` | CHA 07/10 heat pump and COB-15 boiler, slave `08` |
-| `config_bm.csv` | BM control module – operating mode read/write, summer/winter broadcast flag |
+| `config_bm.csv` | BM control module – operating mode, Wi/So switchover, DHW setpoint, DHW minimum, real time clock (all read/write), summer/winter broadcast flag |
 | `config_bm2.csv` | BM-2 control module, slave `35` |
 | `config_mm.csv` | MM-2 mixer module, slave `51` |
 | `_templates.csv` | data type templates |
