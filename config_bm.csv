@@ -44,9 +44,13 @@ r,bm,betriebsart_spiegel,Betriebsart (Spiegel),,f6,5022,285A00,betriebsart_spieg
 # at the moment the mode was changed on the BM.
 u,bm,rcmode,Betriebsart (Broadcast),f1,fe,0800,,ign,,IGN:5,,,,mode,,BI6:1,0=Zeitschaltuhr;1=nur Warmwasser,,Betriebsart
 #
-# --- Time program selection (untested) ------------------------------------
-# TelegramNr 276 (0x0114), same structure as 274. Not verified - uncomment
-# at your own risk. Reads 0 here, which is "program 1" (KeyValueList 0;1;1;2;2;3).
+# --- Time program selection ------------------------------------------------
+# TelegramNr 276 (0x0114). Read verified (0 = program 1). In the vendor
+# database the heating circuit (CTID 10002), DHW (30049) and circulation
+# (30050) selections all point to this same TelegramNr, so on a BM there is
+# only ONE selection shared by all three. Writing it is untested - the write
+# row stays commented out.
+r,bm,zeitprogramm,Zeitprogrammwahl,,f6,5022,1401,zeitprogramm,,UIN,0=Programm 1;1=Programm 2;2=Programm 3,,Zeitprogrammwahl
 #w,bm,zeitprogramm,Zeitprogramm,,f1,5023,1401,zeitprogramm,,UIN,,,Zeitprogramm,suffix,,HEX:4,=5d010000,,
 #
 # --- Automatic summer/winter switchover temperature -----------------------
@@ -118,3 +122,69 @@ w,bm,uhr_sekunde,BM Sekunde setzen,,f1,5023,2701,value,,UIN,,,Sekunde,suffix,,HE
 # See README, "1x DHW", for a workaround that does work.
 #r,bm,warmwasser_1x,1x Warmwasser,,f6,5022,C402,minutes,,SIN,,min,1x Warmwasser
 #w,bm,warmwasser_1x,1x Warmwasser bereiten,,f1,5023,C402,minutes,,SIN,,min,1x Warmwasser,suffix,,HEX:4,=5d010000,,
+#
+# --- Time programs (switching times) --------------------------------------
+# Every register is ONE phase with exactly two data bytes:
+#   byte 0 = END   in quarter hours since 00:00 (0..96, 96 = 24:00)
+#   byte 1 = START in quarter hours since 00:00
+#   128;128 (0x80 0x80) = phase not used. hh = v/4, mm = (v%4)*15.
+# Note the order: END comes first.
+#
+# TelegramNr scheme (three phases per day or day group, ending 0/1/2):
+#   heating circuit  program 1: Mon-Fri 0x1480..82, Sat-Sun 0x1490..92
+#                    program 2: Mon-Fri 0x1580..82, Sat-Sun 0x1590..92
+#                    program 3: one group per day, Mon 0x1610 .. Sun 0x1670
+#                               (+0x10 per day, +0..2 per phase)
+#   DHW              same scheme + 0x300  (program 1 Mon-Fri = 0x1780)
+#   circulation      same scheme + 0x600  (program 1 Mon-Fri = 0x1a80)
+# Only program 1 of heating and DHW is defined below; the rest follows the
+# scheme above.
+#
+# Source of the numbers: zivillian/ism7mqtt, converter.xml,
+# TimeprogConverterTemplate CTID 300000..300052 (value range 0..96 from
+# parameter.xml). ism7mqtt does NOT implement the decoding (the converter
+# throws NotImplementedException) - the byte layout was worked out on the bus:
+#   DHW program 1 Mon-Fri phase 2 (0x1781) reads 60 5c -> end 0x60 = 24:00,
+#   start 0x5c = 23:00. The hwc bit of the RcTarget broadcast, a completely
+#   independent source, went on at 23:00:13 and off at 00:00:09.
+# Cross-check: programs 2 and 3 were still on the Wolf factory defaults and
+# read exactly as such (program 2 Mon-Fri 06:00-08:00 + 15:00-22:00,
+# Sat-Sun 07:00-22:00; program 3 every day 05:30-21:00).
+#
+# Writing works like every other BM parameter: short form NN=08 to the
+# MASTER f1, mandatory suffix 5d010000, data bytes as when reading.
+# Input for "write -c bm <name>" or MQTT .../set is "end;start":
+#   write -c bm heizzeit_mofr_1 78;19     # 04:45 - 19:30
+#   write -c bm heizzeit_saso_2 128;128   # delete phase 2
+# Verified 2026-09-23 in three steps, each read back: raw hex to the inactive
+# program 2, the same via MQTT, then program 1 (a new phase added and deleted).
+# The BM does not check anything - keep phases in order, start < end, no
+# overlaps, no gaps between used phases. Every write is an EEPROM cycle, see
+# README "Gotchas".
+#
+# Switching times never change on their own - poll them rarely (priority 9)
+# if at all.
+r,bm,heizzeit_mofr_1,Heizzeit Mo-Fr Phase 1,,f6,5022,8014,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_mofr_1,Heizzeit Mo-Fr Phase 1 setzen,,f1,5023,8014,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,heizzeit_mofr_2,Heizzeit Mo-Fr Phase 2,,f6,5022,8114,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_mofr_2,Heizzeit Mo-Fr Phase 2 setzen,,f1,5023,8114,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,heizzeit_mofr_3,Heizzeit Mo-Fr Phase 3,,f6,5022,8214,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_mofr_3,Heizzeit Mo-Fr Phase 3 setzen,,f1,5023,8214,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,heizzeit_saso_1,Heizzeit Sa-So Phase 1,,f6,5022,9014,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_saso_1,Heizzeit Sa-So Phase 1 setzen,,f1,5023,9014,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,heizzeit_saso_2,Heizzeit Sa-So Phase 2,,f6,5022,9114,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_saso_2,Heizzeit Sa-So Phase 2 setzen,,f1,5023,9114,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,heizzeit_saso_3,Heizzeit Sa-So Phase 3,,f6,5022,9214,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,heizzeit_saso_3,Heizzeit Sa-So Phase 3 setzen,,f1,5023,9214,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_mofr_1,Warmwasserzeit Mo-Fr Phase 1,,f6,5022,8017,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_mofr_1,Warmwasserzeit Mo-Fr Phase 1 setzen,,f1,5023,8017,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_mofr_2,Warmwasserzeit Mo-Fr Phase 2,,f6,5022,8117,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_mofr_2,Warmwasserzeit Mo-Fr Phase 2 setzen,,f1,5023,8117,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_mofr_3,Warmwasserzeit Mo-Fr Phase 3,,f6,5022,8217,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_mofr_3,Warmwasserzeit Mo-Fr Phase 3 setzen,,f1,5023,8217,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_saso_1,Warmwasserzeit Sa-So Phase 1,,f6,5022,9017,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_saso_1,Warmwasserzeit Sa-So Phase 1 setzen,,f1,5023,9017,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_saso_2,Warmwasserzeit Sa-So Phase 2,,f6,5022,9117,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_saso_2,Warmwasserzeit Sa-So Phase 2 setzen,,f1,5023,9117,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,
+r,bm,wwzeit_saso_3,Warmwasserzeit Sa-So Phase 3,,f6,5022,9217,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden
+w,bm,wwzeit_saso_3,Warmwasserzeit Sa-So Phase 3 setzen,,f1,5023,9217,ende,,UCH,,,Ende in Viertelstunden,start,,UCH,,,Start in Viertelstunden,suffix,,HEX:4,=5d010000,,

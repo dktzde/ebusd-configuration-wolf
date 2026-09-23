@@ -214,3 +214,56 @@ r,cha,hybridbetrieb,(WP117) Hybridbetrieb,,08,5022,1AF432,hybridbetrieb,,UIN,0x0
 w,cha,hybridbetrieb,(WP117) Hybridbetrieb,,08,5023,00F432,hybridbetrieb,,UIN,0x00=Standard;0x01=Ökonomisch;0x02=Ökologisch,,(WP117) Hybridbetrieb
 r,cha,verdichter_max_starts_pro_stunde,(WP121) Verdichter max. Starts pro Stunde,,08,5022,BF582F,verdichter_max_starts_pro_stunde,,UIN,,,(WP121) Verdichter max. Starts pro Stunde
 w,cha,verdichter_max_starts_pro_stunde,(WP121) Verdichter max. Starts pro Stunde,,08,5023,00582F,verdichter_max_starts_pro_stunde,,UIN,,,(WP121) Verdichter max. Starts pro Stunde
+#
+# ===========================================================================
+# COB oil condensing boiler (verified on a Wolf COB-15, slave 08, 2026-09-23)
+# ===========================================================================
+# Everything above is the CHA heat pump set. The rows below are specific to
+# the COB and come from zivillian/ism7mqtt, device template DTID 90000 "COB".
+# Read only. All IDs carry the correct leading CRC8 (the boiler checks it).
+#
+# Note: TelegramNr 554 (DE2A02) is already defined above as
+# "betriebsstunden_verdichter". On a COB the same register is the burner
+# operating hours - it is not repeated here because ebusd rejects a second
+# message with the same address and ID.
+#
+# --- Status bits, TelegramNr 370 --------------------------------------------
+# Bits counted from 0 (proven during a DHW charge, see relay bits below):
+#   bit 1 water pressure OK      bit 3 FLAME          bit 4 E1 input
+#   bit 5 flow limit thermostat OK   bit 6 flue gas limit thermostat OK
+#   bit 7 condensate pump OK
+# Idle value on this boiler: 0xF3, with flame 0xFB.
+r,cha,cob_status,Statusbits COB (TgNr 370),,08,5022,4D7201,bits,,UIN,,,Statusbits roh
+#
+# --- Relay bits / burner stage, TelegramNr 371 -------------------------------
+#   bit 1 valve 1 (stage 1)      bit 2 valve 2 (stage 2)
+#   bit 4 boiler circuit pump    bit 5 DHW charging pump
+#   bit 6 output A1              bit 7 stratified charging pump
+# Observed during a DHW charge: 0x20 (charging pump) -> 0x26 (stage 2, flame)
+# -> 0xA6 -> 0xA2 (stage 1) -> 0x00. 0x20 at the very start of the charge is
+# what proves the bits count from 0 - counted from 1 it would read as "A1".
+r,cha,cob_relais,Relais/Ventile COB (TgNr 371),,08,5022,117301,bits,,UIN,,,Relaisbits roh
+#
+# --- Boiler state, TelegramNr 374 --------------------------------------------
+# 0..24, e.g. 0 standby, 3 heating, 15 DHW charging ("Speicherbetrieb"),
+# 17 DHW pump overrun. Stayed at 15 for a whole charge with operating mode
+# "Heizbetrieb" and the boiler circuit pump never came on: DHW priority.
+r,cha,cob_hg_status,HG Status COB (TgNr 374),,08,5022,617601,status,,UIN,,,HG Status
+#
+# --- Counters ---------------------------------------------------------------
+# 16 bit registers. 550/551 and 552/553 are the low and high word of 32 bit
+# counters: value = hi * 65536 + lo.
+r,cha,cob_brennerstunden_stufe2,Brennerbetriebsstunden 2. Stufe (TgNr 1113),,08,5022,C85904,value,,UIN,,h,Brennerstunden Stufe 2
+r,cha,cob_brennerstarts_lo,Brennerstarts low (TgNr 550),,08,5022,AA2602,value,,UIN,,,Brennerstarts unteres Wort
+r,cha,cob_brennerstarts_hi,Brennerstarts high (TgNr 551),,08,5022,F62702,value,,UIN,,,Brennerstarts oberes Wort
+r,cha,cob_netzstunden_lo,Netzbetriebsstunden low (TgNr 552),,08,5022,662802,value,,UIN,,,Netzstunden unteres Wort
+r,cha,cob_netzstunden_hi,Netzbetriebsstunden high (TgNr 553),,08,5022,3A2902,value,,UIN,,,Netzstunden oberes Wort
+#
+# --- Stage 2 lockout time, TelegramNr 37 ------------------------------------
+r,cha,cob_sperrzeit_stufe2,Sperrzeit 2. Brennerstufe (TgNr 37),,08,5022,4C2500,value,,UIN,,min,Sperrzeit Stufe 2
+#
+# --- DHW setpoint commanded to the boiler, TelegramNr 3 ----------------------
+# Not the user setpoint (that is TelegramNr 19 above / warmwasser_soll in
+# config_bm.csv) but what the controller currently asks for: the real
+# setpoint while DHW is released, 10.0 degC while the DHW time program blocks.
+r,cha,cob_warmwasser_sollwert_aktiv,Warmwasser Sollwert an den Kessel (TgNr 3),,08,5022,E40300,value,,SIN,10,°C,Warmwasser Sollwert aktiv

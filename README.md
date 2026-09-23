@@ -6,8 +6,11 @@ ebusd configuration files for some Wolf devices.
 - **MM-2** (Most messages have to be requested by polling and have to be chosen according to the configuration of the MM-2)
 - **BM-2** at the moment only contain a few select parameters which control a directly connected heating circuit.
 - **BM** (the older module, `config_bm.csv`) – operating mode, summer/winter
-  switchover temperature, DHW setpoint, DHW minimum and the real time clock,
-  all readable *and writable*, verified on a COB-15.
+  switchover temperature, DHW setpoint, DHW minimum, the real time clock and
+  the switching times of the heating and DHW time programs, all readable
+  *and writable*, verified on a COB-15.
+- **COB-15 boiler state** (end of `config_cha.csv`) – flame, burner stage,
+  pumps, boiler state number, burner hours/starts and mains hours, read only.
 
 Note: MM-2 configuration file includes only status fields. Configuration parameters are not included.
 
@@ -136,8 +139,38 @@ forums and issues (22/22). It also exists in the literature:
 - `john30/ebusd-configuration`, `src/wolf/_templates.tsp` – `// todo 0x00 should rather be crc8 of following bytes, see issue #167`
 
 The official `kromschroeder/08..hc.csv` shipped by ebusd has the same bug: it
-hardcodes `00` as the first byte, so `Hwctemp`, `Flowtemp` and `Returntemp`
-run into permanent read timeouts on any device that verifies the CRC.
+hardcodes `00` as the first byte, so `Flowtempdesired`, `Flowtemp`,
+`Returntemp`, `Hwctempdesired` and `Hwctemp` run into permanent read
+timeouts on any device that verifies the CRC – with the default polling that
+is five `ERR: read timeout` lines in the ebusd log every ten minutes or so.
+(Its `Hg…` read rows share the problem but are not polled, so they only
+fail when read explicitly.)
+
+That file is picked by `--scanconfig` as soon as the boiler identifies as
+Kromschroeder, so it is often loaded next to the files of this repository.
+Workaround when using a local `--configpath` copy:
+
+1. Comment out those five rows in `kromschroeder/08..hc.csv`. Do **not** just
+   correct their CRC while `config_cha.csv` is loaded as well – the corrected
+   IDs are identical to rows that already exist there, and ebusd rejects a
+   second message with the same address and ID.
+2. Use the equivalents with correct CRC instead:
+
+| official row | ID there | replacement | correct ID |
+| --- | --- | --- | --- |
+| `Flowtempdesired` (TelegramNr 2) | `000200` | `cha kesselsolltemperatur` | `B80200` |
+| `Flowtemp` (13) | `000d00` | `cha kesseltemperatur` | `280D00` |
+| `Hwctempdesired` (3) | `000300` | `cha cob_warmwasser_sollwert_aktiv` | `E40300` |
+| `Hwctemp` (14) | `000e00` | `cha warmwassertemperatur` | `CC0E00` |
+| `Returntemp` (22) | `001600` | `cha ruecklauftemperatur` | `241600` |
+
+3. **Restart** ebusd afterwards, see "Gotchas".
+
+On the COB-15 this was verified on 2026-09-23. Before, every single poll of
+the five official rows failed (13 timeouts per message in two hours). After,
+the replacement rows answer like any other register – in the following three
+hours the only failures were the occasional bus collisions that hit every
+message alike.
 
 ### Why write messages were *not* changed
 
@@ -275,12 +308,64 @@ and the mode change only looks broken.
 
 ---
 
+## Time programs (BM)
+
+The switching times of all three time programs are ordinary BM parameters,
+readable at the slave `f6` and writable at the master `f1` like everything
+else in `config_bm.csv`. Each register holds **one phase** as two bytes,
+**end first**, then start, both in quarter hours since midnight (`0x80 0x80` =
+phase not used):
+
+```
+read :  f6 5022 02 8117          -> 60 5c  = end 96 (24:00), start 92 (23:00)
+write:  f1 5023 08 8014 4e 13 5d010000     = end 78 (19:30), start 19 (04:45)
+```
+
+| | program 1 | program 2 | program 3 |
+| --- | --- | --- | --- |
+| heating | Mon–Fri `0x1480`, Sat–Sun `0x1490` | Mon–Fri `0x1580`, Sat–Sun `0x1590` | Mon `0x1610` … Sun `0x1670` |
+| DHW | + `0x300` | + `0x300` | + `0x300` |
+| circulation | + `0x600` | + `0x600` | + `0x600` |
+
+Three phases per day or day group (last digit 0, 1, 2). The active program is
+TelegramNr 276, shared by heating, DHW and circulation. `config_bm.csv`
+defines program 1 of heating and DHW; everything else follows the table.
+
+The numbers are in the ism7mqtt database (`TimeprogConverterTemplate`), but
+the decoding is not implemented there. The byte order was proven on the bus
+against the `hwc` bit of the `RcTarget` broadcast, and programs 2 and 3 read
+back exactly as the Wolf factory defaults. The BM does not validate what it
+is given – check start < end, the phase order and overlaps yourself.
+
+---
+
+## COB boiler state
+
+`config_cha.csv` ends with a COB block (ism7mqtt template `DTID 90000 "COB"`):
+status bits (TelegramNr 370, bit 3 = flame), relay bits (371, bit 1/2 = valve
+of burner stage 1/2, bit 4 boiler circuit pump, bit 5 DHW charging pump),
+boiler state number (374), burner hours of stage 2, burner starts and mains
+hours as 32 bit counters split into two 16 bit words.
+
+**Bits count from 0.** Proven during a DHW charge: the first thing the relay
+register showed was `0x20`, about a minute before the burner started. Counted
+from 0 that is bit 5, the DHW charging pump – the only plausible first step
+of a charge. Counted from 1 it would be output A1. The following values fit
+the same way: `0x26` = pump + both valves (stage 2) together with the flame
+bit, `0xA2` = stage 1.
+
+Why this matters: the `action` field of the `hc Operation` broadcast is often
+used as a "burner on" signal. It only reflects the heat request of the
+heating circuit – a DHW charge never shows up there. The flame bit does.
+
+---
+
 ## Files
 
 | File | Content |
 | --- | --- |
-| `config_cha.csv` | CHA 07/10 heat pump and COB-15 boiler, slave `08` |
-| `config_bm.csv` | BM control module – operating mode, Wi/So switchover, DHW setpoint, DHW minimum, real time clock (all read/write), summer/winter broadcast flag |
+| `config_cha.csv` | CHA 07/10 heat pump and COB-15 boiler, slave `08`; COB state block at the end |
+| `config_bm.csv` | BM control module – operating mode, Wi/So switchover, DHW setpoint, DHW minimum, real time clock, time programs (all read/write), time program selection, summer/winter broadcast flag |
 | `config_bm2.csv` | BM-2 control module, slave `35` |
 | `config_mm.csv` | MM-2 mixer module, slave `51` |
 | `_templates.csv` | data type templates |
@@ -304,6 +389,27 @@ column if your modules sit elsewhere on the bus.
 - **Do not run a full register scan and normal reads at the same time.** The
   eBUS is a single serial medium; concurrent access makes ordinary reads run
   into timeouts.
+- **Every parameter write is an EEPROM write.** The BM stores each accepted
+  `5023` write permanently. Typical EEPROM endurance is in the order of
+  100,000 cycles per cell, and the module is meant to last decades. Occasional
+  changes are harmless; an automation that writes periodically, or a UI number
+  field that writes on every arrow click (13 writes in 5 seconds were measured
+  here), is not. Debounce inputs and write only when the value actually
+  differs.
+- **`define -r` replaces across circuits.** It replaces every message with
+  the same address and ID, whatever circuit it belongs to. Used as a quick
+  syntax test it can silently remove a working definition from the running
+  daemon (the write still gets acknowledged by the client, nothing happens).
+  Test new definitions from a CSV file and a restart instead.
+- **`hc Operation` `action` is not a level signal.** The regulator sends
+  that telegram in rotation with three different subjects (pump 1/2,
+  consumers 3/4, heat request 5/6 – the last two values are missing from the
+  official enum), so a naive on/off sensor on it toggles every ten seconds.
+  Only look at the values of the subject you are interested in.
+- **Polled values are not published retained via MQTT.** With a low poll
+  priority it can take well over ten minutes until a value appears again
+  after a restart of the MQTT client. Request it once with
+  `ebusd/<circuit>/<name>/get`.
 - **The telnet `define` command splits on whitespace**, so definitions with
   spaces in the comment columns cannot be pasted into it. Loading the same
   line from a CSV file works fine.
