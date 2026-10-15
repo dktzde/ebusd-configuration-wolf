@@ -372,6 +372,7 @@ heating circuit – a DHW charge never shows up there. The flame bit does.
 | `broadcast.csv` | standard eBUS broadcast messages |
 | `memory.csv` | memory addresses |
 | `tools/ebus_crc8.js` | compute / check / fix the leading CRC8 byte |
+| `installation/` | verbatim snapshot of the live config of the reference installation (newest registers first land there), refreshed with `tools/sync_installation.sh` |
 
 Base files `_templates.csv`, `broadcast.csv` and `memory.csv` are taken from
 [john30/ebusd-configuration](https://github.com/john30/ebusd-configuration/tree/master/archived/de).
