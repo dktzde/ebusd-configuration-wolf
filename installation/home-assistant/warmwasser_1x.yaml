@@ -92,10 +92,14 @@ script:
 
       # Betriebsart unbekannt (MQTT noch nicht da) -> gar nicht erst anfangen,
       # sonst wird später "unknown" als Betriebsart zurückgeschrieben.
+      # Quelle ist die vom BM bestätigte Betriebsart (ohne eBUSd-Echo), nicht die
+      # Auswahl select.heizung_betriebsart: die zeigt nach einem Schreibbefehl bis
+      # zu 90 s den gesendeten Wert, auch wenn das BM ihn nicht übernommen hat.
+      # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
       - condition: template
         value_template: >
-          {{ states('select.heizung_betriebsart')
-             not in ['unknown', 'unavailable', 'none', ''] }}
+          {{ states('sensor.heizung_betriebsart_gespeichert')
+             in state_attr('select.heizung_betriebsart', 'options') | default([], true) }}
 
       # Der Kessel startet eine Ladung erst, wenn der Speicher um die
       # Speicherhysterese unter den Sollwert gefallen ist. Die steht an dieser
@@ -114,36 +118,60 @@ script:
       # Schon im Heizbetrieb: Warmwasser ist ohnehin freigegeben – nichts
       # schreiben, nur auf den vollen Speicher warten (0 EEPROM-Zyklen).
       # Geändert: 2026-09-23 (vorher: Abbruch)
+      # Steht noch ein Merker von einem Lauf, dessen Zurückstellen fehlschlug, wird er
+      # nicht überschrieben (sonst würde "Heizbetrieb" gemerkt und nie zurückgestellt);
+      # dieser Lauf stellt am Ende auf den alten Merker zurück.
+      # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
       - variables:
-          war_heizbetrieb: "{{ is_state('select.heizung_betriebsart', 'Heizbetrieb') }}"
+          merker_offen: >-
+            {{ states('input_text.ww1x_vorherige_betriebsart')
+               in state_attr('select.heizung_betriebsart', 'options') | default([], true) }}
+          war_heizbetrieb: >-
+            {{ is_state('sensor.heizung_betriebsart_gespeichert', 'Heizbetrieb') and not merker_offen }}
 
       - if:
           - condition: template
             value_template: "{{ not war_heizbetrieb }}"
         then:
-          - action: input_text.set_value
-            target:
-              entity_id: input_text.ww1x_vorherige_betriebsart
-            data:
-              value: "{{ states('select.heizung_betriebsart') }}"
+          - if:
+              - condition: template
+                value_template: "{{ not merker_offen }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ww1x_vorherige_betriebsart
+                data:
+                  value: "{{ states('sensor.heizung_betriebsart_gespeichert') }}"
           # Schreiben mit Bestätigung durch das BM (bis zu 3 Versuche, Telegram bei
-          # Fehlschlag, packages/heizung_betriebsart_setzen.yaml). Nicht übernommen →
-          # Merker leeren und abbrechen (sonst 45 Min Warten ohne Ladung).
+          # Fehlschlag, packages/heizung_betriebsart_setzen.yaml). Nicht bestätigt →
+          # zurückstellen und abbrechen (sonst 45 Min Warten ohne Ladung).
           # Geändert: 2026-10-07 (vorher select direkt)
           - action: script.heizung_betriebsart_setzen
             data:
               ziel: "Heizbetrieb"
               anlass: "1x Warmwasser: Start"
             response_variable: start_ergebnis
+          # Nicht bestätigt heißt nicht sicher "nicht übernommen" (Bus kann nach dem Schreiben
+          # ausfallen) → trotzdem einmal zurückstellen; Merker nur nach Bestätigung leeren.
+          # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
           - if:
               - condition: template
                 value_template: "{{ not start_ergebnis.ok }}"
             then:
-              - action: input_text.set_value
-                target:
-                  entity_id: input_text.ww1x_vorherige_betriebsart
+              - action: script.heizung_betriebsart_setzen
                 data:
-                  value: ""
+                  ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
+                  anlass: "1x Warmwasser: Start nicht bestätigt, zurückstellen"
+                response_variable: start_zurueck
+              - if:
+                  - condition: template
+                    value_template: "{{ start_zurueck.ok }}"
+                then:
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.ww1x_vorherige_betriebsart
+                    data:
+                      value: ""
               - stop: "Heizbetrieb nicht übernommen – keine Ladung"
 
       # Warten bis der Speicherfühler die Solltemperatur erreicht hat.
@@ -171,11 +199,17 @@ script:
               ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
               anlass: "1x Warmwasser: zurückstellen"
             response_variable: zurueck_ergebnis
-          - action: input_text.set_value
-            target:
-              entity_id: input_text.ww1x_vorherige_betriebsart
-            data:
-              value: ""
+          # Merker nur nach bestätigtem Zurückstellen leeren, sonst bleibt er für Abbrechen/HA-Start stehen.
+          # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
+          - if:
+              - condition: template
+                value_template: "{{ zurueck_ergebnis.ok }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ww1x_vorherige_betriebsart
+                data:
+                  value: ""
 
   warmwasser_1x_abbrechen:
     alias: "1x Warmwasser abbrechen"
@@ -197,11 +231,17 @@ script:
               ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
               anlass: "1x Warmwasser: abgebrochen, zurückstellen"
             response_variable: abbruch_ergebnis
-          - action: input_text.set_value
-            target:
-              entity_id: input_text.ww1x_vorherige_betriebsart
-            data:
-              value: ""
+          # Merker nur nach bestätigtem Zurückstellen leeren, sonst bleibt er für Abbrechen/HA-Start stehen.
+          # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
+          - if:
+              - condition: template
+                value_template: "{{ abbruch_ergebnis.ok }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ww1x_vorherige_betriebsart
+                data:
+                  value: ""
 
 automation:
   # Sicherheitsnetz: stirbt HA mitten in der Ladung, bliebe die Anlage im
@@ -226,11 +266,17 @@ automation:
           ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
           anlass: "1x Warmwasser: nach HA-Neustart zurückstellen"
         response_variable: neustart_ergebnis
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.ww1x_vorherige_betriebsart
-        data:
-          value: ""
+      # Merker nur nach bestätigtem Zurückstellen leeren, sonst bleibt er für Abbrechen/HA-Start stehen.
+      # Geändert: 2026-11-19 (CodeRabbit-Review PR #4)
+      - if:
+          - condition: template
+            value_template: "{{ neustart_ergebnis.ok }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ww1x_vorherige_betriebsart
+            data:
+              value: ""
 
 # ----------------------------------------------------------------------------
 # Changelog
@@ -239,4 +285,5 @@ automation:
 # | 2026-10-03 | Optionales Feld zieltemperatur (für die manuelle Wasserhygiene) |
 # | 2026-10-03 | Optionales Feld max_dauer (Standard 45 Min, Hygiene 75 Min) |
 # | 2026-10-07 | Betriebsart schreiben/zurückstellen über script.heizung_betriebsart_setzen (Bestätigung durch das BM, 3 Versuche, Telegram); Start nicht übernommen → Abbruch |
+# | 2026-11-19 | CodeRabbit PR #4: Merker nur nach bestätigtem Zurückstellen leeren (Ende, Abbruch, HA-Start); Start unbestätigt → trotzdem zurückstellen; Betriebsart aus sensor.heizung_betriebsart_gespeichert statt select (Echo); offener Merker wird beim Start nicht überschrieben |
 # ----------------------------------------------------------------------------

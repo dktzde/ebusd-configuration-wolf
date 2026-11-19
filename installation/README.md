@@ -15,6 +15,7 @@ it is what ebusd actually loads there, comments in German included:
 | `kromschroeder/50..mc.csv`, `kromschroeder/broadcast.csv`, `broadcast.csv`, `memory.csv` | unchanged base files |
 | `home-assistant/warmwasser_1x.yaml` | Home Assistant package that rebuilds the BM button **"1x DHW"** (see below) |
 | `home-assistant/heizung_betriebsart_setzen.yaml` | script used by it: writes the operating mode (TgNr 274) and confirms it by reading it back from the BM, up to 3 tries |
+| `home-assistant/ebus_mqtt_weiterleitung.yaml` | **required** by the writer: forwards the event `ebus_mqtt_senden` to MQTT (`ebusd/<circuit>/<name>/get` or `/set`); the writer uses it to request the BM readback that confirms a mode change. Needed because recent Home Assistant versions allow `mqtt.publish` only for admin users |
 
 ## "1x DHW" button in Home Assistant
 
@@ -33,7 +34,8 @@ Side effect: during the heating season the rooms get heat too while it runs
 (with DHW priority only after charging); in summer the Wi/So switchover keeps
 heating off.
 
-The packages are snapshots with German comments and the entity IDs of the
+Install all three files as Home Assistant packages; without the forwarder every
+mode change ends as "not confirmed". The packages are snapshots with German comments and the entity IDs of the
 reference installation; adapt them to your own entities (MQTT discovery of
 ebusd, `select` for the operating mode). Private values are replaced by
 placeholders (e.g. the Telegram `chat_id`).
