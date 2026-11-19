@@ -1,0 +1,242 @@
+# ============================================================================
+# "1x Warmwasser bereiten" – Nachbau der gleichnamigen Taste am Bedienmodul
+# ============================================================================
+# Erstellt: 2026-09-22
+#
+# WARUM EIN NACHBAU UND KEIN DIREKTER BEFEHL?
+# Die Funktion existiert in der Wolf-Parameterdatenbank als TelegramNr 708
+# ("1x Warmwasser", 0–60 Minuten). An dieser Anlage antworten aber alle fünf
+# Busteilnehmer (08, 15, 35, 75, f6) mit 0x8000 = Register unbekannt, auch
+# während einer laufenden Ladung. Ein Mitschnitt einer echten Tastenbetätigung
+# am BM zeigt überhaupt kein Parametertelegramm – das Bedienmodul verarbeitet
+# die Funktion intern. Details: /homeassistant/claude_doku/claude_ebus.md Abschnitt 5d.
+#
+# DER ERSATZWEG
+# Am 2026-09-22 gemessen: die Betriebsart "Heizbetrieb" (Dauerbetrieb) gibt die
+# Speicherladung SOFORT und dauerhaft frei, unabhängig vom Warmwasser-Zeit-
+# programm. Im Rundruf RcTarget springt das hwc-Bit auf 1 und der vorgegebene
+# Warmwassersollwert von 10,0 °C auf die echten 55,0 °C.
+# Das Skript schaltet also auf "Heizbetrieb", wartet bis der Speicher voll ist,
+# und stellt die vorherige Betriebsart wieder her.
+#
+# ⚠️ Nebenwirkung im Winter: "Heizbetrieb" heizt auch die Räume durch, solange
+#    das Skript läuft (im Sommer verhindert das die Wi/So-Umschaltung bei
+#    17,5 °C). Die Laufzeit ist deshalb auf 45 Minuten begrenzt.
+# ⚠️ Nicht verwendet wurde ein Anheben der Warmwasser-Solltemperatur: bei
+#    gesperrtem Zeitprogramm bleibt der vorgegebene Sollwert bei 10,0 °C,
+#    der Kessel fängt also gar nicht erst an. Ebenso wirkungslos: die
+#    Warmwasserminimaltemperatur A13 (TelegramNr 408).
+#
+# END-TO-END GETESTET am 2026-09-22, 15:03–15:07:
+#   Betriebsart "nur Warmwasser" gemerkt -> "Heizbetrieb" gesetzt ->
+#   binary_sensor.warmwasserfreigabe ging auf "an", der Regler gab dem Kessel
+#   den echten Sollwert vor -> nach Erreichen der Bedingung wurde
+#   "nur Warmwasser" wiederhergestellt und der Merker geleert.
+#
+# SCHREIBEN (seit 2026-10-07): alle Umstellungen über script.heizung_betriebsart_setzen –
+#   Bestätigung durch das BM selbst, bis zu 3 Versuche, Telegram bei Fehlschlag. Anlass:
+#   am 07.10. ging ein Schreibversuch (Auto-Aus) bei einem eBUS-Aussetzer verloren und
+#   wurde als Erfolg gewertet. Im Winter (Heizbetrieb → Zeitschaltuhr) dauert die
+#   Bestätigung ~2,5 Min, weil das BM-Bit beide Male „Heizen“ zeigt.
+# ============================================================================
+
+input_text:
+  # Merkt sich die Betriebsart, auf die nach der Ladung zurückgestellt wird.
+  # Leer = gerade läuft keine angeforderte Ladung.
+  ww1x_vorherige_betriebsart:
+    name: "1x Warmwasser: vorherige Betriebsart"
+    icon: mdi:backup-restore
+    max: 20
+
+script:
+  warmwasser_1x_bereiten:
+    alias: "1x Warmwasser bereiten"
+    icon: mdi:water-boiler
+    mode: single
+    max_exceeded: silent
+    # Optionales Feld für die Wasserhygiene (warmwasser_hygiene.yaml): feste
+    # Zieltemperatur statt der Solltemperatur aus dem BM. Grund: fällt
+    # number.warmwasser_solltemperatur kurz auf "unknown" (eBUS-Aussetzer), wird
+    # aus dem Rückfallwert 55 eine Wartegrenze von 54 °C und die Ladung endet zu
+    # früh. Ohne Feld verhält sich das Skript genau wie vorher.
+    # Geändert: 2026-10-03
+    fields:
+      zieltemperatur:
+        name: Zieltemperatur
+        description: >-
+          Feste Ziel-Speichertemperatur in °C (gewartet wird bis Ziel − 1 K).
+          Leer = aktuelle Warmwasser-Solltemperatur des BM.
+        required: false
+        example: 62
+        selector:
+          number:
+            min: 40
+            max: 65
+            unit_of_measurement: "°C"
+      # Höchstdauer der Ladung – die Wasserhygiene (62 °C) übergibt 75 Min, weil der
+      # Schichtladespeicher bei kaltem Speicher länger braucht (03.10.: 24 Min ab 39 °C).
+      # Geändert: 2026-10-03
+      max_dauer:
+        name: Höchstdauer
+        description: Spätestens danach wird zurückgeschaltet. Leer = 45 Minuten.
+        required: false
+        example: "01:15:00"
+        # nicht "duration: {}" – leere Selektoren lehnt HA 2026.9 ab (Skript wird deaktiviert)
+        selector:
+          duration:
+            enable_day: false
+    sequence:
+      - variables:
+          ziel_fest: "{{ zieltemperatur | float(0) if zieltemperatur is defined else 0 }}"
+          laufzeit_max: "{{ max_dauer if max_dauer is defined and max_dauer else '00:45:00' }}"
+
+      # Betriebsart unbekannt (MQTT noch nicht da) -> gar nicht erst anfangen,
+      # sonst wird später "unknown" als Betriebsart zurückgeschrieben.
+      - condition: template
+        value_template: >
+          {{ states('select.heizung_betriebsart')
+             not in ['unknown', 'unavailable', 'none', ''] }}
+
+      # Der Kessel startet eine Ladung erst, wenn der Speicher um die
+      # Speicherhysterese unter den Sollwert gefallen ist. Die steht an dieser
+      # Anlage auf 5,0 K (TelegramNr 320 am Kessel 08, am 2026-09-22 gelesen).
+      # Darüber wäre der Heizbetrieb wirkungslos und würde nur 45 Minuten
+      # unnötig laufen – deshalb hier abbrechen.
+      - if:
+          - condition: template
+            value_template: >
+              {{ states('sensor.warmwasser_isttemperatur') | float(0)
+                 > (ziel_fest if ziel_fest > 0
+                    else states('number.warmwasser_solltemperatur') | float(55)) - 5 }}
+        then:
+          - stop: "Speicher ist noch warm genug, der Kessel würde gar nicht anspringen."
+
+      # Schon im Heizbetrieb: Warmwasser ist ohnehin freigegeben – nichts
+      # schreiben, nur auf den vollen Speicher warten (0 EEPROM-Zyklen).
+      # Geändert: 2026-09-23 (vorher: Abbruch)
+      - variables:
+          war_heizbetrieb: "{{ is_state('select.heizung_betriebsart', 'Heizbetrieb') }}"
+
+      - if:
+          - condition: template
+            value_template: "{{ not war_heizbetrieb }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ww1x_vorherige_betriebsart
+            data:
+              value: "{{ states('select.heizung_betriebsart') }}"
+          # Schreiben mit Bestätigung durch das BM (bis zu 3 Versuche, Telegram bei
+          # Fehlschlag, packages/heizung_betriebsart_setzen.yaml). Nicht übernommen →
+          # Merker leeren und abbrechen (sonst 45 Min Warten ohne Ladung).
+          # Geändert: 2026-10-07 (vorher select direkt)
+          - action: script.heizung_betriebsart_setzen
+            data:
+              ziel: "Heizbetrieb"
+              anlass: "1x Warmwasser: Start"
+            response_variable: start_ergebnis
+          - if:
+              - condition: template
+                value_template: "{{ not start_ergebnis.ok }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ww1x_vorherige_betriebsart
+                data:
+                  value: ""
+              - stop: "Heizbetrieb nicht übernommen – keine Ladung"
+
+      # Warten bis der Speicherfühler die Solltemperatur erreicht hat.
+      # 1 K Toleranz, weil der Fühler in 1-K-Schritten meldet.
+      - wait_template: >
+          {{ states('sensor.warmwasser_isttemperatur') | float(0)
+             >= (ziel_fest if ziel_fest > 0
+                 else states('number.warmwasser_solltemperatur') | float(55)) - 1 }}
+        timeout: "{{ laufzeit_max }}"
+        continue_on_timeout: true
+
+      # Sofort zurückschalten – kein Nachlauf mehr. Im BM ist Warmwasser-Vorrang
+      # eingestellt (kein Parallelbetrieb): während der Ladung heizen die Räume
+      # nicht, erst danach würde der Heizbetrieb greifen. Deshalb so früh wie
+      # möglich zurück. (Vorher: 1 Minute Nachlauf.) Geändert: 2026-09-23
+      - if:
+          - condition: template
+            value_template: "{{ not war_heizbetrieb }}"
+        then:
+          # Mit Bestätigung durch das BM (bis zu 3 Versuche, Telegram bei Fehlschlag).
+          # ⚠️ Bliebe dieser Schritt ungeprüft, liefe die Heizung im Dauer-Heizbetrieb weiter.
+          # Geändert: 2026-10-07 (vorher select direkt)
+          - action: script.heizung_betriebsart_setzen
+            data:
+              ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
+              anlass: "1x Warmwasser: zurückstellen"
+            response_variable: zurueck_ergebnis
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ww1x_vorherige_betriebsart
+            data:
+              value: ""
+
+  warmwasser_1x_abbrechen:
+    alias: "1x Warmwasser abbrechen"
+    icon: mdi:stop-circle-outline
+    mode: single
+    sequence:
+      - action: script.turn_off
+        target:
+          entity_id: script.warmwasser_1x_bereiten
+      - if:
+          - condition: template
+            value_template: >
+              {{ states('input_text.ww1x_vorherige_betriebsart')
+                 not in ['unknown', 'unavailable', 'none', ''] }}
+        then:
+          # Geändert: 2026-10-07 – mit Bestätigung (script.heizung_betriebsart_setzen)
+          - action: script.heizung_betriebsart_setzen
+            data:
+              ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
+              anlass: "1x Warmwasser: abgebrochen, zurückstellen"
+            response_variable: abbruch_ergebnis
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ww1x_vorherige_betriebsart
+            data:
+              value: ""
+
+automation:
+  # Sicherheitsnetz: stirbt HA mitten in der Ladung, bliebe die Anlage im
+  # Heizbetrieb stehen. Beim Start wird die gemerkte Betriebsart daher
+  # zurückgeschrieben, sobald eBUSd/MQTT wieder liefern.
+  - id: ww1x_betriebsart_nach_neustart_wiederherstellen
+    alias: "1x Warmwasser: Betriebsart nach Neustart wiederherstellen"
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: template
+        value_template: >
+          {{ states('input_text.ww1x_vorherige_betriebsart')
+             not in ['unknown', 'unavailable', 'none', ''] }}
+    action:
+      - delay: "00:03:00"
+      # Geändert: 2026-10-07 – mit Bestätigung (script.heizung_betriebsart_setzen)
+      - action: script.heizung_betriebsart_setzen
+        data:
+          ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
+          anlass: "1x Warmwasser: nach HA-Neustart zurückstellen"
+        response_variable: neustart_ergebnis
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ww1x_vorherige_betriebsart
+        data:
+          value: ""
+
+# ----------------------------------------------------------------------------
+# Changelog
+# | Datum      | Änderung                                                   |
+# |------------|------------------------------------------------------------|
+# | 2026-10-03 | Optionales Feld zieltemperatur (für die manuelle Wasserhygiene) |
+# | 2026-10-03 | Optionales Feld max_dauer (Standard 45 Min, Hygiene 75 Min) |
+# | 2026-10-07 | Betriebsart schreiben/zurückstellen über script.heizung_betriebsart_setzen (Bestätigung durch das BM, 3 Versuche, Telegram); Start nicht übernommen → Abbruch |
+# ----------------------------------------------------------------------------

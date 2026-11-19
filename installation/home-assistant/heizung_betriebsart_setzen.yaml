@@ -1,0 +1,506 @@
+# Heizung: Betriebsart des Bedienmoduls (BM) schreiben – mit Bestätigung durch das BM und Wiederholung.
+# Alle Automationen/Skripte, die die Betriebsart umstellen, rufen dieses Skript auf (nie mehr select direkt).
+# Dazu die Anzeige „gesendet / im BM gespeichert“ und die Dashboard-Auswahl, die über dieses Skript sendet.
+
+# ══ EINSTELLUNGEN ═══════════════════════════════════════════════════════════
+# Stehen unten im Skript unter „variables“. Wert ändern → speichern → Entwicklerwerkzeuge › YAML ›
+# „Skripte“ neu laden (⚠️ nicht, während script.warmwasser_1x_bereiten läuft).
+#   versuche_max   3    höchstens so oft schreiben (jeder Versuch zählt im EEPROM-Zähler)
+#   abstand_s      90   Pause zwischen zwei Versuchen (Bus erholt sich nach einem Aussetzer)
+#   echo_s         10   so lange auf das Ende des Schreibens warten (eBUSd-Echo, kommt nach < 2 s)
+#   antwort_s      20   so lange auf die Antwort der Abfrage beim BM warten (kommt nach 0,2–1 s)
+#   bestaetigung_s 60   Wechsel Heizen ↔ nur Warmwasser: so lange auf den Rundruf des BM warten
+#                       (kommt alle ~10 s)
+#   poll_warten_s  150  nur wenn das BM auf die Abfrage gar nicht antwortet: so lange auf die
+#                       regelmäßige Abfrage durch eBUSd warten (alle ~90 s)
+# ════════════════════════════════════════════════════════════════════════════
+
+# ============================================================================
+# Beschreibung
+# ============================================================================
+# Erstellt: 2026-10-07
+# Umgebaut: 2026-10-09 – Bestätigung über eine Abfrage beim BM,
+#   Anzeige „gesendet“ / „im BM gespeichert“, Auswahl fürs Dashboard (Nutzerwunsch 09.10.)
+#
+# DREI VERSCHIEDENE DINGE – nicht verwechseln (Befund 09.10.2026)
+#   ① GESENDET     sensor.heizung_betriebsart_gesendet – was HA zuletzt geschickt hat, wann, warum
+#                  und ob das BM es bestätigt hat. Den Befehl selbst meldet das BM nicht zurück.
+#   ② GESPEICHERT  sensor.heizung_betriebsart_gespeichert – was das BM wirklich gespeichert hat
+#                  (TelegramNr 274, alle 5 Betriebsarten). eBUSd fragt alle ~90 s ab, meldet über
+#                  MQTT aber nur Änderungen; nach jedem Befehl fragt dieses Skript sofort nach.
+#   ③ RUNDRUF      sensor.heizung_betriebsart_bm – sendet das BM selbst alle ~10 s, kennt aber nur
+#                  „Heizen“ (jede Heiz-Betriebsart) oder „nur Warmwasser“ (Bit 6). Bis 09.10. hieß
+#                  „Heizen“ dort irreführend „Zeitschaltuhr“ – auch bei Heizbetrieb.
+#   select.heizung_betriebsart (eBUSd direkt) zeigt nach dem Senden ~1–90 s den GESENDETEN Wert:
+#   eBUSd schreibt ihn ins selbe MQTT-Thema wie die Abfrage („Echo“), auch wenn das BM ihn nie
+#   bekommen hat. ② blendet dieses Echo aus.
+#
+# ANLASS (07.10.2026): Taste 3 AN um 06:51, Auto-Aus um 07:51:51 schrieb „nur Warmwasser“ –
+#   genau 20 s nach einem kurzen Verbindungsabbruch eBUSd ↔ Adapter (07:51:30–37, „signal
+#   lost“/„transport closed“). Das BM antwortete nicht („send to f1: ERR: read timeout“,
+#   „[mqtt error] write hc Betriebsart: ERR: read timeout“), die Betriebsart blieb
+#   „Zeitschaltuhr“. Trotzdem zeigte select.heizung_betriebsart 2 s später „nur Warmwasser“
+#   (Echo) → die alte Prüfung „select == Ziel“ meldete Erfolg, kein Telegram. Erst die nächste
+#   Abfrage (07:53:49) zeigte wieder „Zeitschaltuhr“ – die Heizung lief bis 09:09 (Nutzer am BM).
+#   Der binary_sensor.ebusd_global_signal hat den 7-s-Aussetzer nicht einmal gezeigt.
+#
+# ABLAUF JE VERSUCH (seit 09.10.)
+#   1. Ziel schon gespeichert (②) und Rundruf passt → nichts schreiben.
+#   2. Schreiben (select → ebusd/hc/Betriebsart/set), auf das Echo warten (= Schreiben fertig).
+#   3. Abfrage beim BM erzwingen: leere Nachricht an ebusd/hc/Betriebsart/get. eBUSd liest dann
+#      sofort frisch vom BM (getestet 09.10.: auch 2 s nach der vorigen Abfrage, kein Cache) und
+#      meldet die Antwort – auch wenn sie sich nicht geändert hat.
+#   4. Bestätigt = ② meldet nach dem Senden das Ziel UND (bei Heizen ↔ nur Warmwasser) der
+#      Rundruf ③ ist mitgekippt (Ziel Absenkbetrieb: nur ②, Rundruf ungeprüft – seit 26.10.). Antwortet das BM gar nicht → noch einmal fragen und bis
+#      poll_warten_s auf die regelmäßige Abfrage warten.
+#   5. Nicht bestätigt → nach abstand_s erneut (höchstens versuche_max), danach Telegram (hier im
+#      Skript, die Aufrufer senden keins). Ein bestätigter Wert wird nie ein zweites Mal geschrieben.
+#   Bis 09.10. ging die Bestätigung nur über den Rundruf; Heizart → Heizart (z. B. Heizbetrieb →
+#   Zeitschaltuhr) galt als bestätigt, wenn die Auswahl nach 150 s nicht zurücksprang.
+#
+# AUFRUF
+#   action: script.heizung_betriebsart_setzen
+#   data: {ziel: "nur Warmwasser", anlass: "Heizung Auto-Aus"}
+#   response_variable: ergebnis   →  {ok: true/false, versuche: n, grund: "...", bm: "...",
+#                                     gespeichert: "...", betriebsart: "..."}
+#   grund: bestaetigt | schon_eingestellt | ebus (eBUS nicht verfügbar) | nicht_bestaetigt
+#   bm = Rundruf (③), gespeichert = ②, betriebsart = select (eBUSd direkt)
+#   Ohne Rückmeldung (z. B. Taste 3, Dashboard): script.turn_on mit variables –
+#   der Aufrufer wartet dann nicht (Taste 3 bleibt bedienbar).
+#   mode: queued – Aufträge laufen nacheinander (AN, dann AUS = zuletzt gedrückt gilt).
+#   Für ① sendet das Skript das Ereignis heizung_betriebsart_befehl (phase start / ergebnis).
+#
+# EEPROM: jeder Versuch geht über ebusd/hc/Betriebsart/set und zählt automatisch im
+#   EEPROM-Zähler (konservativ – ein nicht übernommener Versuch hat das EEPROM nicht berührt).
+#   Die Abfrage (…/get) ist ein reiner Lesebefehl und zählt nicht.
+#
+# WEITERLEITUNG: Die Abfrage (…/get) schickt das Skript nicht selbst per mqtt.publish, sondern
+#   über das Ereignis ebus_mqtt_senden (packages/ebus_mqtt_weiterleitung.yaml). Ab HA 2026.10
+#   darf nur ein Admin mqtt.publish aufrufen; das Skript läuft aber mit dem Benutzer, der den
+#   Knopf drückt (Mitbewohner: switch.heizung, 1x Warmwasser). Das Schreiben selbst geht über
+#   select.select_option (Entitäts-Aktion, für alle Benutzer erlaubt).
+#
+# Changelog:
+# | 2026-10-07 | Angelegt nach dem Fehler vom 07.10. (Auto-Aus nicht übernommen, Bestätigung über select) |
+# | 2026-10-09 | Bestätigung über Abfrage beim BM (…/get) für alle 5 Betriebsarten; Rundruf heißt „Heizen“ statt „Zeitschaltuhr“; Sensoren gesendet/gespeichert + Dashboard-Auswahl (sendet sofort über dieses Skript) |
+# | 2026-10-09 | Abfragen …/get über die Weiterleitung (Ereignis ebus_mqtt_senden) statt mqtt.publish – HA 2026.10 erlaubt mqtt.publish nur Admins, nicht jeder Nutzer ist Admin |
+# | 2026-10-26 | Ziel „Absenkbetrieb“: Bestätigung nur über ② (gespeichert), Rundruf wird nicht verlangt – sein Bit ist dort ungeprüft (Taste „Absenken“ am BM sendet „nur Warmwasser“); für packages/heizung_absenken.yaml |
+# ============================================================================
+
+template:
+  # ② Betriebsart, die das BM wirklich gespeichert hat – ohne das eBUSd-Echo.
+  # Echo = Nachricht mit dem gesendeten Wert bis 15 s nach einem Schreibbefehl, solange danach
+  # noch keine Abfrage (…/get) lief. Alles andere ist eine Antwort des BM (regelmäßige Abfrage
+  # bei Änderung oder erzwungene Abfrage). antwort_zeit = letzte echte Antwort.
+  # Erstellt: 2026-10-09
+  - triggers:
+      - trigger: mqtt
+        topic: "ebusd/hc/Betriebsart"
+        id: wert
+      - trigger: mqtt
+        topic: "ebusd/hc/Betriebsart/set"
+        id: gesendet
+      - trigger: mqtt
+        topic: "ebusd/hc/Betriebsart/get"
+        id: abfrage
+    variables:
+      jetzt: "{{ as_timestamp(now()) }}"
+      wert: >-
+        {%- if trigger.id == 'wert' and trigger.payload_json is defined
+              and trigger.payload_json is mapping and 'mode' in trigger.payload_json -%}
+          {{ trigger.payload_json.mode.value }}
+        {%- endif -%}
+      # „this“ gibt es in den Block-Variablen noch nicht → eigene Attribute über state_attr
+      g_ts: "{{ state_attr('sensor.heizung_betriebsart_gespeichert', 'gesendet_ts') | float(0) }}"
+      a_ts: "{{ state_attr('sensor.heizung_betriebsart_gespeichert', 'abfrage_ts') | float(0) }}"
+      echo: >-
+        {{ wert != '' and wert == (state_attr('sensor.heizung_betriebsart_gespeichert', 'gesendet_wert') or '')
+           and (jetzt - g_ts) < 15 and a_ts < g_ts }}
+      neu: "{{ wert != '' and not echo }}"
+    sensor:
+      - name: "Heizung Betriebsart gespeichert"
+        unique_id: heizung_betriebsart_gespeichert
+        icon: mdi:content-save-check-outline
+        state: "{{ wert if neu else this.state }}"
+        attributes:
+          antwort_zeit: "{{ now().isoformat() if neu else this.attributes.antwort_zeit | default(none) }}"
+          gesendet_wert: "{{ trigger.payload if trigger.id == 'gesendet' else this.attributes.gesendet_wert | default('') }}"
+          gesendet_ts: "{{ jetzt if trigger.id == 'gesendet' else g_ts }}"
+          abfrage_ts: "{{ jetzt if trigger.id == 'abfrage' else a_ts }}"
+          echo_zeit: "{{ now().isoformat() if echo else this.attributes.echo_zeit | default(none) }}"
+
+  # ① Zuletzt gesendete Betriebsart: Wert, Zeit, Anlass, Ergebnis.
+  # Quelle: Ereignis heizung_betriebsart_befehl aus script.heizung_betriebsart_setzen; ein
+  # Schreibbefehl an ebusd/hc/Betriebsart/set ohne das Skript (Entwicklerwerkzeuge, Auswahl
+  # select.heizung_betriebsart) erscheint als „direkt, ohne Prüfung“.
+  # ergebnis: wartet | wiederholung | bestaetigt | nicht_uebernommen | ebus | ohne_pruefung
+  # Erstellt: 2026-10-09
+  - triggers:
+      - trigger: event
+        event_type: heizung_betriebsart_befehl
+        id: skript
+      - trigger: mqtt
+        topic: "ebusd/hc/Betriebsart/set"
+        id: set
+    variables:
+      jetzt: "{{ as_timestamp(now()) }}"
+      phase: "{{ trigger.event.data.phase | default('') if trigger.id == 'skript' else '' }}"
+      ergebnis_neu: "{{ trigger.event.data.ergebnis | default('') if phase == 'ergebnis' else '' }}"
+      # Schreibbefehl kurz nach dem Start-Ereignis des Skripts gehört zum Skript
+      # („this“ gibt es in den Block-Variablen noch nicht → eigene Attribute über state_attr)
+      vom_skript: >-
+        {{ trigger.id == 'set'
+           and state_attr('sensor.heizung_betriebsart_gesendet', 'quelle') == 'Skript'
+           and (jetzt - (state_attr('sensor.heizung_betriebsart_gesendet', 'zeit_ts') | float(0))) < 15 }}
+      direkt: "{{ trigger.id == 'set' and not vom_skript }}"
+      # Neuer Befehl: Start eines Versuchs, direkter Schreibbefehl oder Abbruch ohne eBUS
+      neu: "{{ phase == 'start' or direkt or ergebnis_neu == 'ebus' }}"
+    sensor:
+      - name: "Heizung Betriebsart gesendet"
+        unique_id: heizung_betriebsart_gesendet
+        icon: mdi:send-clock-outline
+        state: >-
+          {%- if direkt -%}{{ trigger.payload }}
+          {%- elif neu -%}{{ trigger.event.data.ziel | default(this.state) }}
+          {%- else -%}{{ this.state }}{%- endif -%}
+        attributes:
+          zeit: "{{ now().isoformat() if neu else this.attributes.zeit | default(none) }}"
+          zeit_ts: "{{ jetzt if neu else this.attributes.zeit_ts | default(0) }}"
+          quelle: "{{ 'direkt' if direkt else ('Skript' if neu else this.attributes.quelle | default('')) }}"
+          anlass: >-
+            {%- if direkt -%}direkt (ohne Skript)
+            {%- elif neu -%}{{ trigger.event.data.anlass | default('') }}
+            {%- else -%}{{ this.attributes.anlass | default('') }}{%- endif -%}
+          versuch: >-
+            {{ trigger.event.data.versuch | default(1) if trigger.id == 'skript'
+               else (1 if direkt else this.attributes.versuch | default(1)) }}
+          ergebnis: >-
+            {%- if direkt -%}ohne_pruefung
+            {%- elif phase == 'start' -%}wartet
+            {%- elif ergebnis_neu != '' -%}{{ ergebnis_neu }}
+            {%- else -%}{{ this.attributes.ergebnis | default('') }}{%- endif -%}
+          ergebnis_zeit: >-
+            {{ now().isoformat() if ergebnis_neu != '' else
+               (none if neu else this.attributes.ergebnis_zeit | default(none)) }}
+          bm_gespeichert: >-
+            {{ trigger.event.data.gespeichert | default('') if ergebnis_neu != '' else
+               ('' if neu else this.attributes.bm_gespeichert | default('')) }}
+
+  # Auswahl fürs Dashboard: zeigt, was das BM gespeichert hat (②), und sendet eine neue Wahl
+  # sofort – aber über script.heizung_betriebsart_setzen (Bestätigung, 3 Versuche, Telegram),
+  # nicht direkt wie select.heizung_betriebsart. Die Anzeige wechselt erst, wenn das BM die
+  # neue Betriebsart gemeldet hat (meist nach 3–5 s).
+  # Erstellt: 2026-10-09
+  - select:
+      - name: "Heizung Betriebsart senden"
+        unique_id: heizung_betriebsart_senden
+        icon: mdi:sun-snowflake-variant
+        state: "{{ states('sensor.heizung_betriebsart_gespeichert') }}"
+        options: "{{ ['Standby', 'Zeitschaltuhr', 'Heizbetrieb', 'Absenkbetrieb', 'nur Warmwasser'] }}"
+        availability: >-
+          {{ is_state('binary_sensor.ebusd_global_running', 'on')
+             and states('sensor.heizung_betriebsart_gespeichert')
+                 in ['Standby', 'Zeitschaltuhr', 'Heizbetrieb', 'Absenkbetrieb', 'nur Warmwasser'] }}
+        select_option:
+          - action: script.turn_on
+            target:
+              entity_id: script.heizung_betriebsart_setzen
+            data:
+              variables:
+                ziel: "{{ option }}"
+                anlass: "Dashboard Kessel-Status"
+
+script:
+  heizung_betriebsart_setzen:
+    alias: "Heizung: Betriebsart setzen (mit Bestätigung)"
+    icon: mdi:sun-snowflake-variant
+    description: >-
+      Schreibt die Betriebsart des Bedienmoduls, fragt danach beim BM nach (bestätigt = BM hat
+      das Ziel gespeichert) und versucht es sonst bis zu 3× erneut; danach Telegram.
+      Details im Kopf von packages/heizung_betriebsart_setzen.yaml.
+    mode: queued
+    max: 5
+    fields:
+      ziel:
+        name: Ziel-Betriebsart
+        required: true
+        selector:
+          select:
+            options:
+              - "Zeitschaltuhr"
+              - "Heizbetrieb"
+              - "Absenkbetrieb"
+              - "nur Warmwasser"
+              - "Standby"
+      anlass:
+        name: Anlass (für Logbuch und Telegram)
+        selector:
+          text:
+            multiline: false
+    variables:
+      # ── EINSTELLUNGEN (Erklärung im Dateikopf) ──
+      versuche_max: 3
+      abstand_s: 90
+      echo_s: 10
+      antwort_s: 20
+      bestaetigung_s: 60
+      poll_warten_s: 150
+      # ────────────────────────────────────────────
+      anlass_text: "{{ anlass if anlass is defined and anlass else 'Heizung' }}"
+      gesp: sensor.heizung_betriebsart_gespeichert
+      # Erwarteter Rundruf (Bit 6): nur „nur Warmwasser“ setzt das Bit, jede andere = „Heizen“
+      # („Zeitschaltuhr“ = alter Name des Rundruf-Werts bis 09.10.2026, gilt weiter als Heizen)
+      bm_ziel: "{{ 'nur Warmwasser' if ziel == 'nur Warmwasser' else 'Heizen' }}"
+    sequence:
+      - repeat:
+          count: "{{ versuche_max }}"
+          sequence:
+            # ② noch leer (z. B. direkt nach dem Anlegen) → beim BM nachfragen
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ states(gesp) not in state_attr('select.heizung_betriebsart', 'options')
+                                           | default([], true) }}
+              then:
+                - event: ebus_mqtt_senden
+                  event_data:
+                    register: Betriebsart
+                    art: get
+            # eBUS bereit? (kurze Aussetzer abwarten; Rundruf und ② müssen einen Wert haben)
+            - wait_template: >-
+                {{ is_state('binary_sensor.ebusd_global_running', 'on')
+                   and is_state('binary_sensor.ebusd_global_signal', 'on')
+                   and states('sensor.heizung_betriebsart_bm') in ['Heizen', 'Zeitschaltuhr', 'nur Warmwasser']
+                   and states(gesp) in state_attr('select.heizung_betriebsart', 'options') | default([], true) }}
+              timeout: "00:02:00"
+              continue_on_timeout: true
+            - if:
+                - condition: template
+                  value_template: "{{ not wait.completed }}"
+              then:
+                - variables:
+                    ergebnis:
+                      ok: false
+                      versuche: "{{ repeat.index - 1 }}"
+                      grund: ebus
+                      bm: "{{ states('sensor.heizung_betriebsart_bm') }}"
+                      gespeichert: "{{ states(gesp) }}"
+                      betriebsart: "{{ states('select.heizung_betriebsart') }}"
+                - event: heizung_betriebsart_befehl
+                  event_data:
+                    phase: ergebnis
+                    ergebnis: ebus
+                    ziel: "{{ ziel }}"
+                    anlass: "{{ anlass_text }}"
+                    versuch: "{{ repeat.index }}"
+                    gespeichert: "{{ states(gesp) }}"
+                - action: telegram_bot.send_message
+                  continue_on_error: true
+                  data:
+                    chat_id: 123456789  # placeholder
+                    title: "⚠️ *Heizung: Betriebsart nicht geschrieben – eBUS fehlt*"
+                    message: >-
+                      {{ anlass_text }}: „{{ ziel }}“ konnte nicht geschrieben werden
+                      (eBUSd läuft: {{ states('binary_sensor.ebusd_global_running') }},
+                      Bus-Signal: {{ states('binary_sensor.ebusd_global_signal') }},
+                      im BM gespeichert: {{ ergebnis.gespeichert }}). Bitte am Bedienmodul prüfen.
+                - action: logbook.log
+                  data:
+                    name: "Heizung Betriebsart"
+                    entity_id: select.heizung_betriebsart
+                    message: "{{ anlass_text }}: „{{ ziel }}“ nicht geschrieben – eBUS nicht verfügbar"
+                - stop: "eBUS nicht verfügbar"
+                  response_variable: ergebnis
+
+            - variables:
+                rundruf_ww: "{{ is_state('sensor.heizung_betriebsart_bm', 'nur Warmwasser') }}"
+                # Nur das Bit kippt beim Wechsel zwischen „nur Warmwasser“ und Heizen.
+                # Ziel „Absenkbetrieb“: Rundruf nicht prüfen – welches Bit das BM dort sendet, ist
+                # ungeprüft (bei der Taste „Absenken“ am BM sendet es „nur Warmwasser“, 19.10.2026).
+                # Geändert: 2026-10-26 (für packages/heizung_absenken.yaml)
+                bit_wechsel: "{{ ziel != 'Absenkbetrieb' and rundruf_ww != (ziel == 'nur Warmwasser') }}"
+                # Ziel schon erreicht? BM hat es gespeichert und der Rundruf passt dazu.
+                # Beim 2./3. Versuch kann die regelmäßige Abfrage es inzwischen gemeldet haben.
+                schon: "{{ is_state(gesp, ziel) and not bit_wechsel }}"
+            - if:
+                - condition: template
+                  value_template: "{{ schon }}"
+              then:
+                - variables:
+                    ergebnis:
+                      ok: true
+                      versuche: "{{ repeat.index - 1 }}"
+                      grund: "{{ 'schon_eingestellt' if repeat.first else 'bestaetigt' }}"
+                      bm: "{{ states('sensor.heizung_betriebsart_bm') }}"
+                      gespeichert: "{{ states(gesp) }}"
+                      betriebsart: "{{ states('select.heizung_betriebsart') }}"
+                # Nach einem Fehlversuch doch noch bestätigt → in ① eintragen
+                - if:
+                    - condition: template
+                      value_template: "{{ not repeat.first }}"
+                  then:
+                    - event: heizung_betriebsart_befehl
+                      event_data:
+                        phase: ergebnis
+                        ergebnis: bestaetigt
+                        ziel: "{{ ziel }}"
+                        versuch: "{{ repeat.index - 1 }}"
+                        gespeichert: "{{ states(gesp) }}"
+                - stop: "Ziel erreicht"
+                  response_variable: ergebnis
+
+            # ── Schreiben ──
+            - variables:
+                t_gesendet: "{{ as_timestamp(now()) }}"
+            - event: heizung_betriebsart_befehl
+              event_data:
+                phase: start
+                ziel: "{{ ziel }}"
+                anlass: "{{ anlass_text }}"
+                versuch: "{{ repeat.index }}"
+            - action: select.select_option
+              target:
+                entity_id: select.heizung_betriebsart
+              data:
+                option: "{{ ziel }}"
+            # Schreiben fertig = eBUSd-Echo (kommt auch bei Fehlschlag, nach < 2 s)
+            - wait_for_trigger:
+                - trigger: mqtt
+                  topic: "ebusd/hc/Betriebsart"
+              timeout:
+                seconds: "{{ echo_s }}"
+              continue_on_timeout: true
+            - delay:
+                seconds: 2
+
+            # ── Beim BM nachfragen (reiner Lesebefehl, frisch vom Bus) ──
+            # Über die Weiterleitung (HA 2026.10: mqtt.publish nur für Admins – dieses Skript
+            # läuft mit dem Benutzer, der den Knopf drückt), packages/ebus_mqtt_weiterleitung.yaml
+            - variables:
+                t_abfrage: "{{ as_timestamp(now()) }}"
+            - event: ebus_mqtt_senden
+              event_data:
+                register: Betriebsart
+                art: get
+            - wait_template: "{{ as_timestamp(state_attr(gesp, 'antwort_zeit'), 0) > t_abfrage }}"
+              timeout:
+                seconds: "{{ antwort_s }}"
+              continue_on_timeout: true
+            # Keine Antwort (Bus gestört) → noch einmal fragen und bis zur regelmäßigen Abfrage warten
+            - if:
+                - condition: template
+                  value_template: "{{ as_timestamp(state_attr(gesp, 'antwort_zeit'), 0) <= t_abfrage }}"
+              then:
+                - event: ebus_mqtt_senden
+                  event_data:
+                    register: Betriebsart
+                    art: get
+                - wait_template: >-
+                    {{ is_state(gesp, ziel)
+                       and as_timestamp(state_attr(gesp, 'antwort_zeit'), 0) > t_gesendet }}
+                  timeout:
+                    seconds: "{{ poll_warten_s }}"
+                  continue_on_timeout: true
+            # Heizen ↔ nur Warmwasser: zusätzlich muss der Rundruf mitkippen (unabhängige Quelle)
+            - if:
+                - condition: template
+                  value_template: "{{ bit_wechsel and is_state(gesp, ziel) }}"
+              then:
+                - wait_template: >-
+                    {{ is_state('sensor.heizung_betriebsart_bm', 'nur Warmwasser')
+                       == (ziel == 'nur Warmwasser') }}
+                  timeout:
+                    seconds: "{{ bestaetigung_s }}"
+                  continue_on_timeout: true
+            - variables:
+                bestaetigt: >-
+                  {{ is_state(gesp, ziel)
+                     and as_timestamp(state_attr(gesp, 'antwort_zeit'), 0) > t_gesendet
+                     and (ziel == 'Absenkbetrieb'
+                          or is_state('sensor.heizung_betriebsart_bm', 'nur Warmwasser')
+                             == (ziel == 'nur Warmwasser')) }}
+            - if:
+                - condition: template
+                  value_template: "{{ bestaetigt }}"
+              then:
+                - variables:
+                    ergebnis:
+                      ok: true
+                      versuche: "{{ repeat.index }}"
+                      grund: bestaetigt
+                      bm: "{{ states('sensor.heizung_betriebsart_bm') }}"
+                      gespeichert: "{{ states(gesp) }}"
+                      betriebsart: "{{ states('select.heizung_betriebsart') }}"
+                - event: heizung_betriebsart_befehl
+                  event_data:
+                    phase: ergebnis
+                    ergebnis: bestaetigt
+                    ziel: "{{ ziel }}"
+                    versuch: "{{ repeat.index }}"
+                    gespeichert: "{{ states(gesp) }}"
+                - action: logbook.log
+                  data:
+                    name: "Heizung Betriebsart"
+                    entity_id: select.heizung_betriebsart
+                    message: >-
+                      {{ anlass_text }}: „{{ ziel }}“ vom BM bestätigt{{
+                      ' (im ' ~ repeat.index ~ '. Versuch)' if repeat.index > 1 else '' }}
+                - stop: "bestätigt"
+                  response_variable: ergebnis
+
+            - action: logbook.log
+              data:
+                name: "Heizung Betriebsart"
+                entity_id: select.heizung_betriebsart
+                message: >-
+                  {{ anlass_text }}: „{{ ziel }}“ – {{ repeat.index }}. Versuch nicht bestätigt
+                  (im BM gespeichert „{{ states(gesp) }}“, Rundruf „{{ states('sensor.heizung_betriebsart_bm') }}“){{
+                  ', neuer Versuch in ' ~ abstand_s ~ ' s' if not repeat.last else '' }}
+            - if:
+                - condition: template
+                  value_template: "{{ not repeat.last }}"
+              then:
+                - event: heizung_betriebsart_befehl
+                  event_data:
+                    phase: ergebnis
+                    ergebnis: wiederholung
+                    ziel: "{{ ziel }}"
+                    versuch: "{{ repeat.index }}"
+                    gespeichert: "{{ states(gesp) }}"
+                - delay:
+                    seconds: "{{ abstand_s }}"
+
+      # Alle Versuche ohne Bestätigung
+      - variables:
+          ergebnis:
+            ok: false
+            versuche: "{{ versuche_max }}"
+            grund: nicht_bestaetigt
+            bm: "{{ states('sensor.heizung_betriebsart_bm') }}"
+            gespeichert: "{{ states(gesp) }}"
+            betriebsart: "{{ states('select.heizung_betriebsart') }}"
+      - event: heizung_betriebsart_befehl
+        event_data:
+          phase: ergebnis
+          ergebnis: nicht_uebernommen
+          ziel: "{{ ziel }}"
+          versuch: "{{ versuche_max }}"
+          gespeichert: "{{ states(gesp) }}"
+      - action: telegram_bot.send_message
+        continue_on_error: true
+        data:
+          chat_id: 123456789  # placeholder
+          title: "⚠️ *Heizung: Betriebsart nicht übernommen*"
+          message: >-
+            {{ anlass_text }}: „{{ ziel }}“ wurde {{ versuche_max }}× gesendet, das Bedienmodul
+            hat aber weiter „{{ ergebnis.gespeichert }}“ gespeichert (Rundruf: {{ ergebnis.bm }}).
+            {{ 'Die Heizung läuft vermutlich weiter' if ziel == 'nur Warmwasser'
+               else 'Die Heizung ist vermutlich nicht wie gewünscht umgestellt' }} – bitte am
+            Bedienmodul prüfen. Kein weiterer automatischer Versuch.
+      - action: logbook.log
+        data:
+          name: "Heizung Betriebsart"
+          entity_id: select.heizung_betriebsart
+          message: "{{ anlass_text }}: „{{ ziel }}“ nach {{ versuche_max }} Versuchen nicht übernommen – Telegram gesendet"
+      - stop: "nicht bestätigt"
+        response_variable: ergebnis
