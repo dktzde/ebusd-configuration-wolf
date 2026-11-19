@@ -85,6 +85,7 @@
 # | 2026-10-09 | Bestätigung über Abfrage beim BM (…/get) für alle 5 Betriebsarten; Rundruf heißt „Heizen“ statt „Zeitschaltuhr“; Sensoren gesendet/gespeichert + Dashboard-Auswahl (sendet sofort über dieses Skript) |
 # | 2026-10-09 | Abfragen …/get über die Weiterleitung (Ereignis ebus_mqtt_senden) statt mqtt.publish – HA 2026.10 erlaubt mqtt.publish nur Admins, nicht jeder Nutzer ist Admin |
 # | 2026-10-26 | Ziel „Absenkbetrieb“: Bestätigung nur über ② (gespeichert), Rundruf wird nicht verlangt – sein Bit ist dort ungeprüft (Taste „Absenken“ am BM sendet „nur Warmwasser“); für packages/heizung_absenken.yaml |
+# | 2026-11-19 | t_aufruf erst im ersten Schritt (nach der Warteschlange), CodeRabbit 3. Review |
 # | 2026-11-19 | Optionales Feld erzwingen: „schon erreicht“ nur mit frischer BM-Antwort seit dem Aufruf (für 1x Warmwasser nach unsicherem Start; CodeRabbit) |
 # ============================================================================
 
@@ -249,7 +250,6 @@ script:
         selector:
           boolean:
     variables:
-      t_aufruf: "{{ as_timestamp(now()) }}"
       frisch_noetig: "{{ erzwingen | default(false) | bool }}"
       # ── EINSTELLUNGEN (Erklärung im Dateikopf) ──
       versuche_max: 3
@@ -265,6 +265,11 @@ script:
       # („Zeitschaltuhr“ = alter Name des Rundruf-Werts bis 09.10.2026, gilt weiter als Heizen)
       bm_ziel: "{{ 'nur Warmwasser' if ziel == 'nur Warmwasser' else 'Heizen' }}"
     sequence:
+      # Startzeit für „erzwingen“ erst hier: die Skript-Variablen oben rechnet HA schon vor dem
+      # Warten in der Warteschlange (mode: queued) – eine Antwort, die ein vorheriger Aufruf
+      # ausgelöst hat, darf nicht als frisch gelten. Geändert: 2026-11-19 (CodeRabbit)
+      - variables:
+          t_aufruf: "{{ as_timestamp(now()) }}"
       - repeat:
           count: "{{ versuche_max }}"
           sequence:
