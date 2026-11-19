@@ -85,6 +85,7 @@
 # | 2026-10-09 | Bestätigung über Abfrage beim BM (…/get) für alle 5 Betriebsarten; Rundruf heißt „Heizen“ statt „Zeitschaltuhr“; Sensoren gesendet/gespeichert + Dashboard-Auswahl (sendet sofort über dieses Skript) |
 # | 2026-10-09 | Abfragen …/get über die Weiterleitung (Ereignis ebus_mqtt_senden) statt mqtt.publish – HA 2026.10 erlaubt mqtt.publish nur Admins, nicht jeder Nutzer ist Admin |
 # | 2026-10-26 | Ziel „Absenkbetrieb“: Bestätigung nur über ② (gespeichert), Rundruf wird nicht verlangt – sein Bit ist dort ungeprüft (Taste „Absenken“ am BM sendet „nur Warmwasser“); für packages/heizung_absenken.yaml |
+# | 2026-11-19 | Optionales Feld erzwingen: „schon erreicht“ nur mit frischer BM-Antwort seit dem Aufruf (für 1x Warmwasser nach unsicherem Start; CodeRabbit) |
 # ============================================================================
 
 template:
@@ -237,7 +238,19 @@ script:
         selector:
           text:
             multiline: false
+      # Optional: „Ziel schon erreicht“ nur gelten lassen, wenn das BM seit dem Start dieses
+      # Aufrufs geantwortet hat (sonst schreiben + frische Bestätigung). Für das Zurückstellen
+      # nach einem unsicheren Schreiben, wenn ② noch den alten Wert halten kann.
+      # Geändert: 2026-11-19 (CodeRabbit-Review ebusd-configuration-wolf PR #4)
+      erzwingen:
+        name: Frische Bestätigung erzwingen
+        required: false
+        default: false
+        selector:
+          boolean:
     variables:
+      t_aufruf: "{{ as_timestamp(now()) }}"
+      frisch_noetig: "{{ erzwingen | default(false) | bool }}"
       # ── EINSTELLUNGEN (Erklärung im Dateikopf) ──
       versuche_max: 3
       abstand_s: 90
@@ -321,7 +334,11 @@ script:
                 bit_wechsel: "{{ ziel != 'Absenkbetrieb' and rundruf_ww != (ziel == 'nur Warmwasser') }}"
                 # Ziel schon erreicht? BM hat es gespeichert und der Rundruf passt dazu.
                 # Beim 2./3. Versuch kann die regelmäßige Abfrage es inzwischen gemeldet haben.
-                schon: "{{ is_state(gesp, ziel) and not bit_wechsel }}"
+                # erzwingen: nur mit einer Antwort des BM nach dem Start dieses Aufrufs (kein Echo, s. ②).
+                schon: >-
+                  {{ is_state(gesp, ziel) and not bit_wechsel
+                     and (not frisch_noetig
+                          or as_timestamp(state_attr(gesp, 'antwort_zeit'), 0) > t_aufruf) }}
             - if:
                 - condition: template
                   value_template: "{{ schon }}"

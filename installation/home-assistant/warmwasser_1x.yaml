@@ -162,6 +162,8 @@ script:
                 data:
                   ziel: "{{ states('input_text.ww1x_vorherige_betriebsart') }}"
                   anlass: "1x Warmwasser: Start nicht bestätigt, zurückstellen"
+                  # ② kann noch den alten Wert halten → „schon erreicht“ nur mit frischer BM-Antwort
+                  erzwingen: true
                 response_variable: start_zurueck
               - if:
                   - condition: template
@@ -285,5 +287,6 @@ automation:
 # | 2026-10-03 | Optionales Feld zieltemperatur (für die manuelle Wasserhygiene) |
 # | 2026-10-03 | Optionales Feld max_dauer (Standard 45 Min, Hygiene 75 Min) |
 # | 2026-10-07 | Betriebsart schreiben/zurückstellen über script.heizung_betriebsart_setzen (Bestätigung durch das BM, 3 Versuche, Telegram); Start nicht übernommen → Abbruch |
+# | 2026-11-19 | Zurückstellen nach unbestätigtem Start mit erzwingen: true (frische BM-Antwort, CodeRabbit 2. Review) |
 # | 2026-11-19 | CodeRabbit PR #4: Merker nur nach bestätigtem Zurückstellen leeren (Ende, Abbruch, HA-Start); Start unbestätigt → trotzdem zurückstellen; Betriebsart aus sensor.heizung_betriebsart_gespeichert statt select (Echo); offener Merker wird beim Start nicht überschrieben |
 # ----------------------------------------------------------------------------
