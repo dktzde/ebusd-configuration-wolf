@@ -1,0 +1,92 @@
+# eBUS: MQTT-Weiterleitung – Skripte, die ein Mensch per Knopf startet, schicken ihre eBUSd-Befehle
+# (Abfrage …/get, Zeitschaltuhr …/set) über diese Automation, statt selbst mqtt.publish aufzurufen.
+
+# ══ EINSTELLUNGEN ═══════════════════════════════════════════════════════════
+# Stehen in der Automation unter „variables“ (ganz oben). Wert ändern → speichern →
+# Entwicklerwerkzeuge › YAML › „Automationen“ neu laden.
+#   kreis        hc                               eBUSd-Kreis, Thema ebusd/<kreis>/<register>/<art>
+#   set_erlaubt  ^(Hz|Ww)zeit(mofr|saso)[123]$    Register, die über die Weiterleitung GESCHRIEBEN werden
+#                                                 dürfen (nur die Zeitschaltuhr). Abfragen (get) sind für
+#                                                 jedes Register erlaubt – reine Lesebefehle.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ============================================================================
+# Beschreibung
+# ============================================================================
+# Erstellt: 2026-10-09
+#
+# WARUM: Ab HA 2026.10 dürfen nur noch Administratoren mqtt.publish und mqtt.dump aufrufen
+#   (core PR #182045, Release Notes „Backward-incompatible changes › MQTT“). Ein Skript läuft mit
+#   dem Benutzer, der es startet – auch über einen Template-Schalter wie switch.heizung. Startet
+#   Mitbewohner (kein Admin) im Dashboard „Mitbewohner-Warmwasser“ „Heizung an/aus“ oder „1x Warmwasser“,
+#   bräche script.heizung_betriebsart_setzen am ersten mqtt.publish mit „Unauthorized“ ab –
+#   Betriebsart unbestätigt, keine Wiederholung, kein Telegram.
+#   Eine Automation läuft dagegen IMMER ohne Benutzer (automation/__init__.py legt bei jedem
+#   Auslösen einen neuen Kontext ohne user_id an) und darf senden – auch wenn das Ereignis aus
+#   Mitbewohners Skript kommt. Das ist der Weg, den HA in den Release Notes empfiehlt.
+#
+# AUFRUF (statt action: mqtt.publish):
+#   - event: ebus_mqtt_senden
+#     event_data:
+#       register: Betriebsart   # Name der eBUSd-Nachricht (nur Buchstaben, Ziffern, _)
+#       art: get                # get = Abfrage beim Gerät (Nutzlast leer) | set = schreiben
+#       wert: "68;64"           # nur bei set: die Nutzlast
+#   Dauer Ereignis → MQTT: wenige Millisekunden. Die Skripte warten danach ohnehin auf die Antwort.
+#
+# SCHUTZ: nur Kreis hc, Registername nur [A-Za-z0-9_], schreiben (set) nur für set_erlaubt.
+#   Alles andere wird verworfen und als Warnung ins HA-Log geschrieben. Nicht-Admins können selbst
+#   keine Ereignisse auslösen (REST-API und Websocket nur für Admins) – nur über unsere Skripte.
+#   Schreiben über …/set zählt weiter automatisch im EEPROM-Zähler (MQTT-Auslöser ebusd/+/+/set).
+#
+# GILT NUR FÜR SKRIPTE. Automationen (Samstags-Hygiene, verzögerte Eingabe, Discovery beim Start …)
+#   laufen ohnehin ohne Benutzer und senden weiter direkt per mqtt.publish.
+#   Umgestellt am 09.10.: script.heizung_betriebsart_setzen, script.warmwasser_hygiene_manuell,
+#   script.warmwasser_hygiene_manuell_soll_zurueck, script.zeitschaltuhr_neu_einlesen,
+#   script.zeitschaltuhr_phase_uebertragen, script.ebus_raumwerte_neu_einlesen.
+#   Neues Skript, das per Knopf läuft und eBUSd anspricht → ebenfalls dieses Ereignis verwenden.
+#
+# IST DIESE AUTOMATION AUS, kommt keine Antwort vom BM: script.heizung_betriebsart_setzen versucht
+#   es dann bis zu 3× und meldet per Telegram; die anderen Skripte laufen in ihre Wartezeiten.
+#
+# Changelog:
+# | 2026-10-09 | Angelegt für HA 2026.10 (mqtt.publish nur noch für Admins, Mitbewohner-Dashboard) |
+# ============================================================================
+
+automation:
+  - id: ebus_mqtt_weiterleitung
+    alias: "eBUS: MQTT-Weiterleitung für Skripte"
+    description: >-
+      Sendet eBUSd-Befehle (…/get, Zeitschaltuhr …/set) für Skripte, die per Knopf gestartet werden.
+      Seit HA 2026.10 dürfen nur Admins mqtt.publish aufrufen; Automationen laufen ohne Benutzer.
+      Details: packages/ebus_mqtt_weiterleitung.yaml
+    mode: parallel
+    max: 30
+    trace:
+      stored_traces: 20
+    variables:
+      # ── EINSTELLUNGEN (Erklärung oben in der Datei) ──
+      kreis: hc
+      set_erlaubt: "^(Hz|Ww)zeit(mofr|saso)[123]$"
+      # ─────────────────────────────────────────────────
+      register: "{{ trigger.event.data.register | default('', true) | string }}"
+      art: "{{ trigger.event.data.art | default('get', true) | string }}"
+      erlaubt: >-
+        {{ (register is match('^[A-Za-z0-9_]+$'))
+           and (art == 'get' or (art == 'set' and register is match(set_erlaubt))) }}
+    triggers:
+      - trigger: event
+        event_type: ebus_mqtt_senden
+    actions:
+      - if: "{{ erlaubt | bool(false) }}"
+        then:
+          - action: mqtt.publish
+            data:
+              topic: "ebusd/{{ kreis }}/{{ register }}/{{ art }}"
+              payload: "{{ (trigger.event.data.wert | default('', true) | string) if art == 'set' else '' }}"
+        else:
+          - action: system_log.write
+            data:
+              level: warning
+              logger: homeassistant.components.automation.ebus_mqtt_weiterleitung
+              message: >-
+                eBUS-Weiterleitung verworfen (nicht erlaubt): register={{ register }}, art={{ art }}
