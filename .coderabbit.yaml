@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit settings: reviews the ebusd CSV files, tools and Home Assistant packages, with few and relevant comments.
+# Free for public repositories. Docs: https://docs.coderabbit.ai/reference/configuration
+language: en-US
+
+reviews:
+  # quiet = only important findings, chill = balanced, assertive = many (nitpicky)
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  poem: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # documentation-only PRs need no automatic review
+    ignore_title_keywords:
+      - "docs:"
+      - "docs("
+
+  # Only config and code: no Markdown or images
+  path_filters:
+    - "!**/*.md"
+    - "!**/*.png"
+
+  path_instructions:
+    - path: "**/*.csv"
+      instructions: >-
+        ebusd message definitions for Wolf / Kromschroeder devices (ebusd CSV format, see the ebusd wiki
+        "4.1. Message definition"). Check: column count and field order of every row, data types and divisors
+        matching the comment, unique circuit/name per read/write pair, and the message ID: for PBSB 5022 reads the
+        first ID byte is a CRC8 (polynomial 0x5C) of the TelegramNr followed by the TelegramNr little endian
+        (verify with tools/ebus_crc8.js); writes that need it end with the suffix 5d010000. Flag value lists or
+        ranges that contradict the comment. Comments may be German in installation/; that is intended.
+    - path: "installation/home-assistant/*.yaml"
+      instructions: >-
+        Home Assistant packages (snapshot of a live installation, German comments intended). Check that every write
+        of the operating mode has a timeout or dead-man path that restores the previous mode, also after a Home
+        Assistant restart, template errors on unknown/unavailable states, and that no private values (chat IDs,
+        tokens, IP addresses, person names) appear; placeholders are expected.
+    - path: "tools/*.sh"
+      instructions: "POSIX sh (busybox ash), no bashisms; quote variables; the sync must never copy secrets or private values."
+    - path: "tools/*.js"
+      instructions: "Plain Node.js without dependencies; CRC8 polynomial 0x5C must match the README."
+
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+
+chat:
+  auto_reply: true
