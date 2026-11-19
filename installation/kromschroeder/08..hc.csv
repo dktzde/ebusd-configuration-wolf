@@ -35,7 +35,7 @@ r,,,Hg75,HG 75 - Warmwasserdurchsatz,,,5022,006c01,value,,UIN,,min,Minuten
 r,,,Hg9x,HG 9x - Netzbetriebsstunden,,,5022,002802,value,,UIN,,h,Stunden
 r,,,Hg90,HG 90 - Brennerbetriebsstunden,,,5022,002a02,value,,UIN,,h,Stunden
 r,,,Hg91,HG 91 - Brennerstarts,,,5022,002602,value,,UIN,,,
-# 2026-09-23 (Opus 5.5): die 5 folgenden Lesedefinitionen deaktiviert. Erstes ID-Byte 00 ist
+# 2026-09-23: die 5 folgenden Lesedefinitionen deaktiviert. Erstes ID-Byte 00 ist
 # keine gueltige CRC8 -> Kessel 08 antwortet nie (ERR: read timeout alle ~10 Min im Log).
 # Flowtemp/Hwctemp = Flowtempist/Hwctempist in custom_wolf.csv (gleicher Telegramm-Schluessel,
 # korrigiert wuerden sie kollidieren). Flowtempdesired/Hwctempdesired mit korrekter CRC nach

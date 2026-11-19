@@ -1,7 +1,7 @@
 type,circuit,name,comment,qq,zz,pbsb,id,*name,part,type,divisor/values,unit,comment
 # Eigene eBUS-Definitionen fuer Wolf COB-15 (OEL-Brennwert) + BM (Kromschroeder-Kennung)
 # Diese Nachrichten fehlen in der offiziellen Config kromschroeder/08..hc.csv.
-# Erstellt: 2026-09-19 durch Opus 4.6, Effort: max
+# Erstellt: 2026-09-19
 #
 # ###################################################################
 # WICHTIG - das erste ID-Byte ist eine CRC8, kein Praefix!
@@ -32,7 +32,7 @@ r1,hc,Flowtempist,Vorlauf Isttemperatur,,08,5022,280D00,temp,,SIN,10,°C,Vorlauf
 #   0 = Heizen (JEDE Heiz-Betriebsart: Zeitschaltuhr, Heizbetrieb, ...)   1 = nur Warmwasser
 # Welche Heiz-Betriebsart genau, steht nur in "hc Betriebsart" (TelegramNr 274, unten).
 # Bis 2026-10-09 hiess 0 hier "Zeitschaltuhr" - irrefuehrend, auch Heizbetrieb ergibt 0
-# (gemessen 09.10.). Geaendert: 2026-10-09 durch Opus 5.5, Effort: k. A.
+# (gemessen 09.10.). Geaendert: 2026-10-09
 u,hc,Rcmode,Rundruf Heizen/nur Warmwasser,f1,fe,0800,,ign,,IGN:5,,,,mode,,BI6:1,0=Heizen;1=nur Warmwasser,,Betriebsart
 #
 # --- Betriebsart LESEN, TelegramNr 274 (0x0112) ---
@@ -46,7 +46,7 @@ u,hc,Rcmode,Rundruf Heizen/nur Warmwasser,f1,fe,0800,,ign,,IGN:5,,,,mode,,BI6:1,
 r1,hc,Betriebsart,Betriebsart BM lesen,,f6,5022,1201,mode,,UIN,0=Abgastest;1=Standby;2=Zeitschaltuhr;3=Heizbetrieb;4=Absenkbetrieb;5=nur Warmwasser,,Betriebsart
 #
 # --- Betriebsart SCHREIBEN, TelegramNr 274 an die MASTER-Adresse f1 ---
-# ERFOLGREICH GETESTET 2026-09-19 (Opus 4.6, Effort max), beide Richtungen.
+# ERFOLGREICH GETESTET 2026-09-19, beide Richtungen.
 # Kurzform NN=08: <TelegramNr LE16><Wert LE16><Suffix 4 Byte>, kein CRC-Byte.
 # Wirkung verifiziert ueber 4 unabhaengige Kanaele: TelegramNr 274, TelegramNr 90,
 # Broadcast-Bit 6 (hc Rcmode) und RcTarget desiredtemp (5.0 -> 36.8 C).
@@ -56,7 +56,7 @@ w,hc,Betriebsart,Betriebsart BM setzen,,f1,5023,1201,mode,,UIN,0=Abgastest;1=Sta
 # ###################################################################
 # Automatische Sommer-/Winter-Umschalttemperatur ("Wi/So Umschaltung")
 # TelegramNr 278 (0x0116) -> ID little endian 1601
-# Erstellt: 2026-09-20 durch Opus 4.6, Effort: max
+# Erstellt: 2026-09-20
 #
 # Oberhalb dieser (gedaempften) Aussentemperatur schaltet das BM in
 # Zeitschaltuhr-/Automatikbetrieb die Heizung selbsttaetig ab; der
@@ -101,14 +101,30 @@ w,hc,Wisotemp,Sommer/Winter Umschalttemperatur setzen,,f1,5023,1601,temp,,SIN,10
 # stattdessen die Wi/So-Umschalttemperatur (TgNr 278).
 # Gelesen 2026-09-20 und 2026-10-14: hex f65022021701 -> 026400 = 10,0 C.
 # Lesen Kurzform an f6, schreiben Kurzform NN=08 an MASTER f1, Suffix 5d010000.
-# Erstellt: 2026-10-14 durch Opus 5.5, Effort: low
+# Erstellt: 2026-10-14
 # ###################################################################
 r5,hc,Ecoabs,ECO/ABS Absenk-Abschaltung (TgNr 279),,f6,5022,1701,temp,,SIN,10,°C,ECO/ABS
 w,hc,Ecoabs,ECO/ABS setzen,,f1,5023,1701,temp,,SIN,10,°C,ECO/ABS,suffix,,HEX:4,=5d010000,,
 #
 # ###################################################################
+# Frostschutzgrenze (BM-Parameter A09) - TelegramNr 2560 (0x0A00) am BM
+# Unter dieser Aussentemperatur laeuft die Heizkreispumpe dauernd (Wolf:
+# Werk +2 C, Bereich -20..+10 C, Schritt 1) - auch wenn ECO/ABS den Brenner
+# sperrt. Beobachtet 12./13.11.2026: aussen 2 C -> Pumpe die ganze Nacht an.
+# Quelle: zivillian/ism7mqtt CTID 150047 "A09" = TgNr 2560; das BM verteilt
+# den Wert zyklisch als Rundruf (30fe5023 09 28 000a 1400 5d010000).
+# Gelesen 28.10. und 13.11.2026: hex f6502202000a -> 021400 = 20 = 2,0 C.
+# SCHREIBEN NOCH NICHT GEPRUEFT (Stand 13.11.2026) - erster Schreibtest
+# durch den Nutzer, Anzeige A09 am BM vergleichen.
+# Lesen Kurzform an f6, schreiben an MASTER f1, Suffix 5d010000 (wie ECO/ABS).
+# Erstellt: 2026-11-13
+# ###################################################################
+r5,hc,Frostgrenze,Frostschutzgrenze A09 (TgNr 2560),,f6,5022,000a,temp,,SIN,10,°C,Frostschutzgrenze
+w,hc,Frostgrenze,Frostschutzgrenze A09 setzen,,f1,5023,000a,temp,,SIN,10,°C,Frostschutzgrenze,suffix,,HEX:4,=5d010000,,
+#
+# ###################################################################
 # Echtzeituhr des BM - TelegramNr 289..295 (0x0121..0x0127)
-# Erstellt: 2026-09-22 durch Opus 4.6, Effort: max
+# Erstellt: 2026-09-22
 #
 # Reihenfolge am Bus (2026-09-20 und 2026-09-22 bestaetigt):
 #   0x0121 Wochentag (1=Montag .. 7=Sonntag)
@@ -128,7 +144,7 @@ w,hc,Ecoabs,ECO/ABS setzen,,f1,5023,1701,temp,,SIN,10,°C,ECO/ABS,suffix,,HEX:4,
 #
 # ###################################################################
 # NEGATIVBEFUND "1x Warmwasser bereiten" - NICHT ueber den Bus ausloesbar
-# Untersucht: 2026-09-22 durch Opus 4.6, Effort: max
+# Untersucht: 2026-09-22
 #
 # Die Taste "1x Warmwasser bereiten" am Bedienmodul hat an dieser Anlage
 # KEINE Entsprechung als eBUS-Parameter. Geprueft und verworfen:
@@ -160,7 +176,7 @@ w,hc,Ecoabs,ECO/ABS setzen,,f1,5023,1701,temp,,SIN,10,°C,ECO/ABS,suffix,,HEX:4,
 #
 # ###################################################################
 # Warmwasser-Solltemperatur - TelegramNr 19 (0x0013) -> ID little endian 1300
-# Erstellt: 2026-09-22 durch Opus 4.6, Effort: max
+# Erstellt: 2026-09-22
 #
 # Der am Bedienmodul eingestellte Warmwasser-Sollwert. UIN mit Divisor 10,
 # Wertebereich laut Herstellerdatenbank 15-80 C; in Home Assistant auf
@@ -194,7 +210,7 @@ w,hc,Clocksecond,BM Sekunde setzen,,f1,5023,2701,value,,UIN,,,Sekunde,suffix,,HE
 #
 # ###################################################################
 # ZEITSCHALTUHR - Schaltzeiten der Zeitprogramme am BM
-# Erstellt: 2026-09-23 durch Opus 5, Effort: max
+# Erstellt: 2026-09-23
 #
 # AUFBAU EINES SCHALTZEIT-REGISTERS
 #   Jedes Register ist EINE Heizphase und liefert genau 2 Datenbytes:
@@ -273,7 +289,7 @@ r9,hc,Wwzeitsaso3,Warmwasserzeit Sa-So Phase 3,,f6,5022,9217,ende,,UCH,,,Ende in
 #
 # ###################################################################
 # ZEITSCHALTUHR SCHREIBEN - Schaltzeiten von Zeitprogramm 1 setzen
-# Erstellt: 2026-09-23 durch Opus 5.5, Effort: xhigh
+# Erstellt: 2026-09-23
 #
 # Schema wie Betriebsart/Uhr: Kurzform NN=08 an die MASTER-Adresse f1,
 # 4-Byte-Suffix 5d010000 ist Pflicht. Datenbytes wie beim Lesen:
@@ -307,7 +323,7 @@ w,hc,Hzzeitp2test,TEST Heizzeit Prog2 Mo-Fr Phase 1 setzen,,f1,5023,8015,ende,,U
 #
 # ###################################################################
 # BRENNER / KESSEL-ZUSTAND - Kessel 08, nur LESEN
-# Erstellt: 2026-09-23 durch Opus 5.5, Effort: high
+# Erstellt: 2026-09-23
 # Quelle: zivillian/ism7mqtt, Geraetevorlage DTID 90000 "COB".
 # Am 2026-09-23 per hex gegengelesen (Brenner aus): 370=00f3, 371=0000,
 # 374=0000, 554=34458 h, 1113=6279 h, Starts=3*65536+29599=226207.
@@ -339,7 +355,7 @@ r9,hc,Sperrzeit2,Sperrzeit 2. Brennerstufe (TgNr 37),,08,5022,4C2500,value,,UIN,
 # Discovery-Entitaeten sensor.ebusd_hc_flowtempdesired / _hwctempdesired
 # weiterlaufen. Gemessen 2026-09-19: TgNr 2 = 5,0 C (Sommer), TgNr 3 = 55,0 C.
 # CRC(02 00) = 0xB8, CRC(03 00) = 0xE4 (tools/ebus_crc8.js).
-# Erstellt: 2026-09-23 durch Opus 5.5, Effort: medium
+# Erstellt: 2026-09-23
 # ###################################################################
 r5,hc,Flowtempdesired,Vorlauf Sollwert Kessel (TgNr 2),,08,5022,B80200,value,,SIN,10,°C,Vorlauf Soll
 r5,hc,Hwctempdesired,Warmwasser Sollwert Kessel (TgNr 3),,08,5022,E40300,value,,SIN,10,°C,Warmwasser Soll
@@ -360,7 +376,7 @@ r5,hc,Hwctempdesired,Warmwasser Sollwert Kessel (TgNr 3),,08,5022,E40300,value,,
 # Lesen wie alle BM-Register in der Kurzform ohne CRC-Byte an f6,
 # schreiben in der Kurzform NN=08 an die MASTER-Adresse f1, Suffix 5d010000.
 # Jeder Schreibvorgang = 1 EEPROM-Zyklus -> in HA nur verzoegert (10 s Ruhe).
-# Erstellt: 2026-10-02 durch Opus 5.5, Effort: high
+# Erstellt: 2026-10-02
 # ###################################################################
 r2,hc,Raumtemp,Raumtemperatur Ist BM (TgNr 17),,f6,5022,1100,temp,,SIN,10,°C,Raum Ist
 r2,hc,Raumsoll,Raumsolltemperatur BM (TgNr 18),,f6,5022,1200,temp,,SIN,10,°C,Raum Soll
@@ -370,3 +386,20 @@ r5,hc,Spartemp,Spartemperatur Absenktemperatur (TgNr 8),,f6,5022,0800,temp,,SIN,
 w,hc,Spartemp,Spartemperatur setzen,,f1,5023,0800,temp,,SIN,10,°C,Spartemperatur,suffix,,HEX:4,=5d010000,,
 r5,hc,Heizkurve,Heizkurve Steilheit (TgNr 270),,f6,5022,0e01,value,,SIN,100,,Heizkurve
 w,hc,Heizkurve,Heizkurve setzen,,f1,5023,0e01,value,,SIN,100,,Heizkurve,suffix,,HEX:4,=5d010000,,
+#
+# ###################################################################
+# Wirksame Betriebsart + Statusanzeige des BM (zeigen die Sondertasten
+# "Absenken"/"Heizen", die die gespeicherte Betriebsart 274 NICHT aendern)
+# Gelesen 2026-10-26 bei laufender Taste "Absenken" (claude_ebus_forschung.md 5i):
+#   TgNr 90 (5a00)   = 4 Absenkbetrieb, TgNr 274 blieb 2 Zeitschaltuhr
+#   TgNr 2567 (070a) = 8 "Mond" (ism7mqtt DTID 30000 "BM", PTID 30068 "Status",
+#                      Bits 1 Standby, 2 Schornstein, 4 Wasserhahn, 8 Mond, 16 Sonne)
+# Nur lesen. Wirksam erst nach Neustart des eBUSd-Add-ons (nicht reload).
+# TgNr 327/328: Forschung - bei laufender Taste 80/24, ohne Namen in ism7mqtt;
+#   mitschreiben, um zu sehen, wann sie sich aendern (r9 = selten abfragen).
+# Erstellt: 2026-10-27
+# ###################################################################
+r2,hc,Betriebsartwirksam,Betriebsart wirksam (TgNr 90),,f6,5022,5a00,mode,,UIN,0=Abgastest;1=Standby;2=Zeitschaltuhr;3=Heizbetrieb;4=Absenkbetrieb;5=nur Warmwasser,,Betriebsart wirksam
+r2,hc,Bmstatus,BM Statusanzeige Bits (TgNr 2567),,f6,5022,070a,bits,,UIN,,,1 Standby 2 Schornstein 4 Wasserhahn 8 Mond 16 Sonne
+r9,hc,Tg327,BM TgNr 327 Forschung,,f6,5022,4701,value,,UIN,,,unbekannt
+r9,hc,Tg328,BM TgNr 328 Forschung,,f6,5022,4801,value,,UIN,,,unbekannt
